@@ -7,7 +7,7 @@ const createWithdrawalRequest = async (req, res) => {
     const { amount, balance_type, transaction_pin } = req.body;
     const userId = req.user.id;
     // Validate balance_type
-    const validBalanceTypes = ['coins_balance', 'games_balance', 'referral_balance', 'investment_balance'];
+    const validBalanceTypes = ['coins_balance', 'withdrawable_balance', 'referral_balance', 'investment_balance'];
     if (!balance_type || !validBalanceTypes.includes(balance_type)) {
       return res.status(400).json({
         status: 'error',
@@ -108,8 +108,8 @@ const createWithdrawalRequest = async (req, res) => {
 
     // Determine normal minimum boundaries for valid operations
     let minAmount = 1000;
-    if (balance_type === 'games_balance') {
-      minAmount = limitsMap['min_withdrawal_games'] || 1000;
+    if (balance_type === 'withdrawable_balance') {
+      minAmount = limitsMap['min_withdrawal_games'] || 1000; // Still use 'min_withdrawal_games' setting for withdrawable balance
     } else if (balance_type === 'investment_balance') {
       minAmount = limitsMap['min_withdrawal_investment'] || 3500;
     }
@@ -218,7 +218,10 @@ const createWithdrawalRequest = async (req, res) => {
       
     // Deduct from the specific balance type (Skip for coins_balance)
     let newBalance = currentBalance;
-    const totalWithdrawnField = `total_withdrawn_${balance_type.replace('_balance', '')}`;
+    
+    // We map withdrawable_balance to total_withdrawn_games for historical consistency, 
+    // or to a new field if the schema supports it. Assuming schema has total_withdrawn_withdrawable based on our previous discussions
+    const totalWithdrawnField = balance_type === 'withdrawable_balance' ? 'total_withdrawn_withdrawable' : `total_withdrawn_${balance_type.replace('_balance', '')}`;
     const currentTotalWithdrawn = parseFloat(wallet[totalWithdrawnField] || 0);
     
     if (balance_type !== 'coins_balance') {

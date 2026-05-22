@@ -61,14 +61,28 @@ const playGame = async (req, res) => {
     if (new Set(picks).size !== picks.length)
       return res.status(400).json({ status: 'error', message: 'Duplicate numbers are not allowed' });
 
-    const { data: wallet } = await supabaseAdmin.from('wallets').select('games_balance').eq('user_id', userId).single();
+    const { data: wallet } = await supabaseAdmin.from('wallets').select('games_balance, withdrawable_balance').eq('user_id', userId).single();
     if (!wallet)
       return res.status(400).json({ status: 'error', message: 'Could not retrieve wallet' });
 
-    const balance = parseFloat(wallet.games_balance);
-    const val = validateStake(stakeAmount, minStake, balance);
+    const gamesBalance = parseFloat(wallet.games_balance || 0);
+    const withdrawableBalance = parseFloat(wallet.withdrawable_balance || 0);
+    const totalPlayableBalance = gamesBalance + withdrawableBalance;
+
+    const val = validateStake(stakeAmount, minStake, totalPlayableBalance);
     if (!val.valid)
       return res.status(400).json({ status: 'error', message: val.error });
+
+    let newGamesBalance = gamesBalance;
+    let newWithdrawableBalance = withdrawableBalance;
+
+    if (gamesBalance >= stakeAmount) {
+      newGamesBalance -= stakeAmount;
+    } else {
+      const remainder = stakeAmount - gamesBalance;
+      newGamesBalance = 0;
+      newWithdrawableBalance -= remainder;
+    }
 
     const playerWins   = crypto.randomInt(0, 100) < winRate;
     const drawnNumbers = generateDrawnNumbers(picks, drawCount, numbersRange, playerWins, payoutTables);
@@ -76,10 +90,20 @@ const playGame = async (req, res) => {
 
     const payout = isWin ? parseFloat((stakeAmount * multiplier).toFixed(2)) : 0;
     const profit = parseFloat((payout - stakeAmount).toFixed(2));
-    const newBal = parseFloat((balance + profit).toFixed(2));
+    
+    // Add full payout to withdrawable balance
+    if (isWin) {
+      newWithdrawableBalance += payout;
+    }
+
+    const newTotalBal = parseFloat((newGamesBalance + newWithdrawableBalance).toFixed(2));
 
     await supabaseAdmin.from('wallets')
-      .update({ games_balance: newBal, updated_at: new Date().toISOString() })
+      .update({ 
+        games_balance: parseFloat(newGamesBalance.toFixed(2)), 
+        withdrawable_balance: parseFloat(newWithdrawableBalance.toFixed(2)), 
+        updated_at: new Date().toISOString() 
+      })
       .eq('user_id', userId);
 
     const { data: round } = await supabaseAdmin.from('keno_rounds').insert({
@@ -120,7 +144,7 @@ const playGame = async (req, res) => {
           multiplier, payout_amount: payout, profit_loss: profit,
           status: isWin ? 'won' : 'lost', created_at: round?.created_at
         },
-        new_gaming_wallet_balance: newBal
+        new_gaming_wallet_balance: newTotalBal
       }
     });
   } catch (err) {

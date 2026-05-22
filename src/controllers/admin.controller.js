@@ -28,8 +28,8 @@ const getAllUsers = async (req, res) => {
           id, username, email
         ),
         wallets (
-          games_balance, referral_balance, investment_balance, coins_balance,
-          total_withdrawn_games, total_withdrawn_referral, 
+          games_balance, withdrawable_balance, referral_balance, investment_balance, coins_balance,
+          total_withdrawn_games, total_withdrawn_withdrawable, total_withdrawn_referral, 
           total_withdrawn_investment, total_withdrawn_coins
         )
       `)
@@ -276,14 +276,17 @@ const getUserDetails = async (req, res) => {
     const wallet = user.wallets?.[0] || {};
     const summary = {
       total_balance: (parseFloat(wallet.games_balance || 0) + 
+                     parseFloat(wallet.withdrawable_balance || 0) + 
                      parseFloat(wallet.referral_balance || 0) + 
                      parseFloat(wallet.investment_balance || 0) + 
                      parseFloat(wallet.coins_balance || 0)),
       games_balance: parseFloat(wallet.games_balance || 0),
+      withdrawable_balance: parseFloat(wallet.withdrawable_balance || 0),
       referral_balance: parseFloat(wallet.referral_balance || 0),
       investment_balance: parseFloat(wallet.investment_balance || 0),
       coins_balance: parseFloat(wallet.coins_balance || 0),
       total_withdrawn: (parseFloat(wallet.total_withdrawn_games || 0) +
+                       parseFloat(wallet.total_withdrawn_withdrawable || 0) +
                        parseFloat(wallet.total_withdrawn_referral || 0) +
                        parseFloat(wallet.total_withdrawn_investment || 0) +
                        parseFloat(wallet.total_withdrawn_coins || 0))
@@ -447,9 +450,11 @@ const getUserEarningsAdmin = async (req, res) => {
       current_wallet: {
         coins_balance: parseFloat(wallet.coins_balance || 0),
         games_balance: parseFloat(wallet.games_balance || 0),
+        withdrawable_balance: parseFloat(wallet.withdrawable_balance || 0),
         referral_balance: parseFloat(wallet.referral_balance || 0),
         investment_balance: parseFloat(wallet.investment_balance || 0),
         total_withdrawn_games: parseFloat(wallet.total_withdrawn_games || 0),
+        total_withdrawn_withdrawable: parseFloat(wallet.total_withdrawn_withdrawable || 0),
         total_withdrawn_referral: parseFloat(wallet.total_withdrawn_referral || 0),
         total_withdrawn_investment: parseFloat(wallet.total_withdrawn_investment || 0),
         total_withdrawn_coins: parseFloat(wallet.total_withdrawn_coins || 0)
@@ -493,7 +498,8 @@ const getUserEarningsAdmin = async (req, res) => {
         total_referrals: directReferrals || 0
       },
 
-      recent_transactions: enhancedRecentTransactions.slice(0, 20),
+      recent_transactions: enhancedRecentTransactions.slice(0, 100),
+      transactions: enhancedRecentTransactions,
 
       statistics: {
         total_transactions: (allTransactions || []).length,
@@ -1673,17 +1679,18 @@ const getDashboardStats = async (req, res) => {
     // 3. Wallet Analytics (Balance Breakdown)
     const { data: wallets, error: walletError } = await supabaseAdmin
       .from('wallets')
-      .select('games_balance, referral_balance, coins_balance, investment_balance');
+      .select('games_balance, withdrawable_balance, referral_balance, coins_balance, investment_balance');
 
     if (walletError) throw walletError;
 
     const totalGames = wallets?.reduce((sum, w) => sum + parseFloat(w.games_balance || 0), 0) || 0;
+    const totalWithdrawable = wallets?.reduce((sum, w) => sum + parseFloat(w.withdrawable_balance || 0), 0) || 0;
     const totalReferral = wallets?.reduce((sum, w) => sum + parseFloat(w.referral_balance || 0), 0) || 0;
     const totalCoins = wallets?.reduce((sum, w) => sum + parseFloat(w.coins_balance || 0), 0) || 0;
     const totalInvestment = wallets?.reduce((sum, w) => sum + parseFloat(w.investment_balance || 0), 0) || 0;
     
     // Combined balance excludes investment for the "Total Balance" if desired, or includes all
-    const combinedBalance = totalGames + totalReferral + totalCoins;
+    const combinedBalance = totalGames + totalWithdrawable + totalReferral + totalCoins;
 
     // 4. Kash Ads Stats
     const { data: kashAdsData } = await supabaseAdmin
@@ -1721,6 +1728,7 @@ const getDashboardStats = async (req, res) => {
         balance_growth: {
           combined_balance: combinedBalance,
           total_games_balance: totalGames,
+          total_withdrawable_balance: totalWithdrawable,
           total_referral_balance: totalReferral,
           total_coins_balance: totalCoins,
           total_investment_balance: totalInvestment
@@ -1751,6 +1759,7 @@ const getTopEarners = async (req, res) => {
         referral_balance,
         coins_balance,
         games_balance,
+        withdrawable_balance,
         investment_balance,
         users!inner (
           username,
@@ -1768,7 +1777,8 @@ const getTopEarners = async (req, res) => {
       user_tier: entry.users?.user_tier || 'Free',
       referral_balance: parseFloat(entry.referral_balance || 0),
       coins_balance: parseFloat(entry.coins_balance || 0),
-      games_balance: parseFloat(entry.games_balance || 0)
+      games_balance: parseFloat(entry.games_balance || 0),
+      withdrawable_balance: parseFloat(entry.withdrawable_balance || 0)
     })) || [];
 
     res.status(200).json({
@@ -1971,14 +1981,15 @@ const getGameAnalytics = async (req, res) => {
       if (timeframe === 'all-time') {
         const { data: wallets } = await supabaseAdmin
           .from('wallets')
-          .select('games_balance, users!inner(username, user_tier)')
-          .order('games_balance', { ascending: false })
+          .select('games_balance, withdrawable_balance, users!inner(username, user_tier)')
+          .order('withdrawable_balance', { ascending: false })
           .limit(10);
         topEarners = (wallets || []).map((w, i) => ({
           rank:          i + 1,
           username:      w.users?.username,
           user_tier:     w.users?.user_tier,
           games_balance: parseFloat(w.games_balance || 0),
+          withdrawable_balance: parseFloat(w.withdrawable_balance || 0),
         }));
       } else {
         const userNetMap = {};
@@ -2010,7 +2021,8 @@ const getGameAnalytics = async (req, res) => {
             rank: i + 1,
             username: map[uid]?.username || 'N/A',
             user_tier: map[uid]?.user_tier || 'Free',
-            games_balance: Math.round(userNetMap[uid])
+            games_balance: Math.round(userNetMap[uid]),
+            withdrawable_balance: Math.round(userNetMap[uid])
           }));
         }
       }
@@ -2290,8 +2302,8 @@ const getActivityAnalytics = async (req, res) => {
     // 4. Wallet Stats
     const { data: wallets } = await supabaseAdmin
       .from('wallets')
-      .select('games_balance, coins_balance, referral_balance');
-    const allBalances = (wallets || []).map(w => parseFloat(w.games_balance || 0) + parseFloat(w.coins_balance || 0) + parseFloat(w.referral_balance || 0));
+      .select('games_balance, withdrawable_balance, coins_balance, referral_balance');
+    const allBalances = (wallets || []).map(w => parseFloat(w.games_balance || 0) + parseFloat(w.withdrawable_balance || 0) + parseFloat(w.coins_balance || 0) + parseFloat(w.referral_balance || 0));
     const walletStats = {
       avg: allBalances.length > 0 ? (allBalances.reduce((a,b)=>a+b,0)/allBalances.length).toFixed(0) : 0,
       max: allBalances.length > 0 ? Math.max(...allBalances).toFixed(0) : 0,
@@ -2829,7 +2841,7 @@ const getMerchantDetail = async (req, res) => {
     // Also cross-check users.referred_by
     const { data: extraUsers } = await supabaseAdmin
       .from('users')
-      .select('id, username, full_name, user_tier, created_at, wallets(games_balance, referral_balance)')
+      .select('id, username, full_name, user_tier, created_at, wallets(games_balance, withdrawable_balance, referral_balance)')
       .eq('referred_by', merchantId);
 
     const referredIdsFromTable = (referralRows || []).map(r => r.referred_id);
@@ -2843,7 +2855,7 @@ const getMerchantDetail = async (req, res) => {
     if (allReferredIds.length > 0) {
       const { data: rUsers } = await supabaseAdmin
         .from('users')
-        .select('id, username, full_name, user_tier, created_at, wallets(games_balance, referral_balance)')
+        .select('id, username, full_name, user_tier, created_at, wallets(games_balance, withdrawable_balance, referral_balance)')
         .in('id', allReferredIds);
       referredUsers = rUsers || [];
     }

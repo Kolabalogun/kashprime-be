@@ -132,7 +132,7 @@ const playGame = async (req, res) => {
     // Get user's gaming wallet balance
     const { data: wallet, error: walletError } = await supabaseAdmin
       .from('wallets')
-      .select('games_balance')
+      .select('games_balance, withdrawable_balance')
       .eq('user_id', userId)
       .single();
 
@@ -143,10 +143,12 @@ const playGame = async (req, res) => {
       });
     }
 
-    const currentBalance = parseFloat(wallet.games_balance);
+    const gamesBalance = parseFloat(wallet.games_balance || 0);
+    const withdrawableBalance = parseFloat(wallet.withdrawable_balance || 0);
+    const totalPlayableBalance = gamesBalance + withdrawableBalance;
 
     // Validate stake amount
-    const validation = validateStakeAmount(stake_amount, minStake, currentBalance);
+    const validation = validateStakeAmount(stake_amount, minStake, totalPlayableBalance);
     if (!validation.valid) {
       return res.status(400).json({
         status: 'error',
@@ -167,10 +169,22 @@ const playGame = async (req, res) => {
       profitLoss = payoutCalc.profit;
     }
 
-    // Calculate new balance
-    const newBalance = isWin 
-      ? currentBalance - stake_amount + payoutAmount 
-      : currentBalance - stake_amount;
+    let newGamesBalance = gamesBalance;
+    let newWithdrawableBalance = withdrawableBalance;
+
+    if (gamesBalance >= stake_amount) {
+      newGamesBalance -= stake_amount;
+    } else {
+      const remainder = stake_amount - gamesBalance;
+      newGamesBalance = 0;
+      newWithdrawableBalance -= remainder;
+    }
+    
+    if (isWin) {
+      newWithdrawableBalance += payoutAmount;
+    }
+
+    const newTotalBal = parseFloat((newGamesBalance + newWithdrawableBalance).toFixed(2));
 
     // Create game round
     const { data: round, error: roundError } = await supabaseAdmin
@@ -199,7 +213,10 @@ const playGame = async (req, res) => {
     // Update user's gaming wallet
     const { error: updateError } = await supabaseAdmin
       .from('wallets')
-      .update({ games_balance: newBalance })
+      .update({ 
+        games_balance: parseFloat(newGamesBalance.toFixed(2)),
+        withdrawable_balance: parseFloat(newWithdrawableBalance.toFixed(2))
+      })
       .eq('user_id', userId);
 
     if (updateError) {
@@ -313,7 +330,7 @@ const playGame = async (req, res) => {
             status: round.status,
             created_at: round.created_at
           },
-          new_games_balance: Number(newBalance)
+          new_games_balance: newTotalBal
         }
       });
     } else {
@@ -333,7 +350,7 @@ const playGame = async (req, res) => {
             status: round.status,
             created_at: round.created_at
           },
-          new_games_balance: Number(newBalance)
+          new_games_balance: newTotalBal
         }
       });
     }

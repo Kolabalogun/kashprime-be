@@ -90,12 +90,15 @@ const placeBet = async (req, res) => {
     const minStake  = parseFloat(parsePlatformSetting(map.higher_lower_min_stake, '50'));
     const houseEdge = parseFloat(parsePlatformSetting(map.higher_lower_house_edge, '0.05'));
 
-    const { data: wallet } = await supabaseAdmin.from('wallets').select('games_balance').eq('user_id', userId).single();
+    const { data: wallet } = await supabaseAdmin.from('wallets').select('games_balance, withdrawable_balance').eq('user_id', userId).single();
     if (!wallet)
       return res.status(400).json({ status: 'error', message: 'Could not retrieve wallet' });
 
-    const balance = parseFloat(wallet.games_balance);
-    const val = validateStake(stakeAmount, minStake, balance);
+    const gamesBalance = parseFloat(wallet.games_balance || 0);
+    const withdrawableBalance = parseFloat(wallet.withdrawable_balance || 0);
+    const totalPlayableBalance = gamesBalance + withdrawableBalance;
+
+    const val = validateStake(stakeAmount, minStake, totalPlayableBalance);
     if (!val.valid)
       return res.status(400).json({ status: 'error', message: val.error });
 
@@ -104,14 +107,34 @@ const placeBet = async (req, res) => {
     const resultNumber = generateResultNumber(round.shown_number, direction, playerWins);
     const isWin        = direction === 'higher' ? resultNumber > round.shown_number : resultNumber < round.shown_number;
 
+    let newGamesBalance = gamesBalance;
+    let newWithdrawableBalance = withdrawableBalance;
+
+    if (gamesBalance >= stakeAmount) {
+      newGamesBalance -= stakeAmount;
+    } else {
+      const remainder = stakeAmount - gamesBalance;
+      newGamesBalance = 0;
+      newWithdrawableBalance -= remainder;
+    }
+
     const { getBothMultipliers: getMultis } = require('../utils/helpers/higherLower.helpers');
     const multiplier = getMultis(round.shown_number, houseEdge)[direction];
     const payout  = isWin ? parseFloat((stakeAmount * multiplier).toFixed(2)) : 0;
     const profit  = parseFloat((payout - stakeAmount).toFixed(2));
-    const newBal  = parseFloat((balance + profit).toFixed(2));
+    
+    if (isWin) {
+      newWithdrawableBalance += payout;
+    }
+
+    const newTotalBal = parseFloat((newGamesBalance + newWithdrawableBalance).toFixed(2));
 
     await supabaseAdmin.from('wallets')
-      .update({ games_balance: newBal, updated_at: new Date().toISOString() })
+      .update({ 
+        games_balance: parseFloat(newGamesBalance.toFixed(2)), 
+        withdrawable_balance: parseFloat(newWithdrawableBalance.toFixed(2)),
+        updated_at: new Date().toISOString() 
+      })
       .eq('user_id', userId);
 
     await supabaseAdmin.from('higher_lower_rounds').update({
@@ -154,7 +177,7 @@ const placeBet = async (req, res) => {
         payout_amount:  payout,
         profit_loss:    profit,
         status:         isWin ? 'won' : 'lost',
-        new_gaming_wallet_balance: newBal
+        new_gaming_wallet_balance: newTotalBal
       }
     });
   } catch (err) {

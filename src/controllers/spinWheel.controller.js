@@ -66,7 +66,7 @@ const playGame = async (req, res) => {
     // Get wallet balance
     const { data: wallet, error: walletErr } = await supabaseAdmin
       .from('wallets')
-      .select('games_balance')
+      .select('games_balance, withdrawable_balance')
       .eq('user_id', userId)
       .single();
 
@@ -74,8 +74,11 @@ const playGame = async (req, res) => {
       return res.status(400).json({ status: 'error', message: 'Could not retrieve wallet' });
     }
 
-    const balance = parseFloat(wallet.games_balance || 0);
-    const validation = validateStakeAmount(stakeAmount, minStake, balance);
+    const gamesBalance = parseFloat(wallet.games_balance || 0);
+    const withdrawableBalance = parseFloat(wallet.withdrawable_balance || 0);
+    const totalPlayableBalance = gamesBalance + withdrawableBalance;
+
+    const validation = validateStakeAmount(stakeAmount, minStake, totalPlayableBalance);
     if (!validation.valid) {
       return res.status(400).json({ status: 'error', message: validation.error });
     }
@@ -84,14 +87,31 @@ const playGame = async (req, res) => {
     const { segment, isWin } = generateSpinResult(winRate, segments);
     const { payout, profit } = calculatePayout(stakeAmount, segment.multiplier);
 
-    // Calculate new balance
-    const balanceAfterStake = parseFloat((balance - stakeAmount).toFixed(2));
-    const newBalance = parseFloat((balanceAfterStake + payout).toFixed(2));
+    let newGamesBalance = gamesBalance;
+    let newWithdrawableBalance = withdrawableBalance;
+
+    if (gamesBalance >= stakeAmount) {
+      newGamesBalance -= stakeAmount;
+    } else {
+      const remainder = stakeAmount - gamesBalance;
+      newGamesBalance = 0;
+      newWithdrawableBalance -= remainder;
+    }
+
+    if (isWin) {
+      newWithdrawableBalance += payout;
+    }
+
+    const newTotalBal = parseFloat((newGamesBalance + newWithdrawableBalance).toFixed(2));
 
     // Update wallet (games_balance instead of gaming_wallet for Kashprime convention)
     const { error: walletUpdateErr } = await supabaseAdmin
       .from('wallets')
-      .update({ games_balance: newBalance, updated_at: new Date().toISOString() })
+      .update({ 
+        games_balance: parseFloat(newGamesBalance.toFixed(2)),
+        withdrawable_balance: parseFloat(newWithdrawableBalance.toFixed(2)),
+        updated_at: new Date().toISOString() 
+      })
       .eq('user_id', userId);
 
     if (walletUpdateErr) {
@@ -171,7 +191,7 @@ const playGame = async (req, res) => {
           status:         isWin ? 'won' : 'lost',
           created_at:     round?.created_at,
         },
-        new_games_balance: newBalance,
+        new_games_balance: newTotalBal,
       },
     });
   } catch (err) {

@@ -117,12 +117,16 @@ const startGame = async (req, res) => {
 
     const { data: wallet } = await supabaseAdmin
       .from('wallets')
-      .select('games_balance')
+      .select('games_balance, withdrawable_balance')
       .eq('user_id', userId)
       .single();
 
+    const gamesBalance = parseFloat(wallet.games_balance || 0);
+    const withdrawableBalance = parseFloat(wallet.withdrawable_balance || 0);
+    const totalPlayableBalance = gamesBalance + withdrawableBalance;
+
     const minStake = parseFloat(settingsMap.mines_min_stake || 50);
-    const validation = validateStakeAmount(stake_amount, minStake, wallet.games_balance);
+    const validation = validateStakeAmount(stake_amount, minStake, totalPlayableBalance);
     
     if (!validation.valid) {
       return res.status(400).json({
@@ -133,11 +137,24 @@ const startGame = async (req, res) => {
 
     const stake = parseFloat(stake_amount);
     const bombPositions = generateBombPositions(bomb_count);
-    const newBalance = parseFloat(wallet.games_balance) - stake;
+    
+    let newGamesBalance = gamesBalance;
+    let newWithdrawableBalance = withdrawableBalance;
+
+    if (gamesBalance >= stake) {
+      newGamesBalance -= stake;
+    } else {
+      const remainder = stake - gamesBalance;
+      newGamesBalance = 0;
+      newWithdrawableBalance -= remainder;
+    }
     
     const { error: walletError } = await supabaseAdmin
       .from('wallets')
-      .update({ games_balance: newBalance })
+      .update({ 
+        games_balance: parseFloat(newGamesBalance.toFixed(2)), 
+        withdrawable_balance: parseFloat(newWithdrawableBalance.toFixed(2)) 
+      })
       .eq('user_id', userId);
 
     if (walletError) throw walletError;
@@ -157,7 +174,7 @@ const startGame = async (req, res) => {
     if (roundError) {
       await supabaseAdmin
         .from('wallets')
-        .update({ games_balance: wallet.games_balance })
+        .update({ games_balance: gamesBalance, withdrawable_balance: withdrawableBalance })
         .eq('user_id', userId);
       throw roundError;
     }
@@ -194,7 +211,7 @@ const startGame = async (req, res) => {
           multipliers: bombConfig.multipliers,
           max_clicks: bombConfig.levels
         },
-        new_games_balance: newBalance.toFixed(2)
+        new_games_balance: (newGamesBalance + newWithdrawableBalance).toFixed(2)
       }
     });
   } catch (error) {
@@ -255,9 +272,13 @@ const processGameResult = async (req, res) => {
 
     const { data: wallet } = await supabaseAdmin
       .from('wallets')
-      .select('games_balance')
+      .select('games_balance, withdrawable_balance')
       .eq('user_id', userId)
       .single();
+
+    const gamesBalance = parseFloat(wallet.games_balance || 0);
+    const withdrawableBalance = parseFloat(wallet.withdrawable_balance || 0);
+    const totalPlayableBalance = gamesBalance + withdrawableBalance;
 
     let endedAt = new Date().toISOString();
     
@@ -303,7 +324,7 @@ const processGameResult = async (req, res) => {
             profit_loss: -parseFloat(round.stake_amount),
             ended_at: endedAt
           },
-          new_gaming_wallet_balance: parseFloat(wallet.games_balance).toFixed(2)
+          new_gaming_wallet_balance: totalPlayableBalance.toFixed(2)
         }
       });
     }
@@ -323,9 +344,13 @@ const processGameResult = async (req, res) => {
       multiplierConfig
     );
 
-    const newBalance = parseFloat(wallet.games_balance) + payout;
+    const newWithdrawableBalance = withdrawableBalance + payout;
+    const newTotalBal = gamesBalance + newWithdrawableBalance;
     
-    await supabaseAdmin.from('wallets').update({ games_balance: newBalance }).eq('user_id', userId);
+    await supabaseAdmin.from('wallets').update({ 
+      games_balance: parseFloat(gamesBalance.toFixed(2)),
+      withdrawable_balance: parseFloat(newWithdrawableBalance.toFixed(2)) 
+    }).eq('user_id', userId);
     
     await supabaseAdmin.from('mines_rounds').update({
       status: 'cashed_out',
@@ -378,7 +403,7 @@ const processGameResult = async (req, res) => {
           profit_loss: profit,
           ended_at: endedAt
         },
-        new_games_balance: newBalance.toFixed(2)
+        new_games_balance: newTotalBal.toFixed(2)
       }
     });
   } catch (error) {
