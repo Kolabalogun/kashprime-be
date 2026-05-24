@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config({ override: true });
 
 // Polyfill Web API globals (fetch, Headers, Request, Response) for Node.js environments
 if (!globalThis.fetch || !globalThis.Headers) {
@@ -12,8 +12,8 @@ if (!globalThis.fetch || !globalThis.Headers) {
 const express = require('express');
 const app = require('./src/app');
 
-   
-                    
+
+
 
 const PORT = process.env.PORT || 5000;
 

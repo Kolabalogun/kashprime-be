@@ -38,13 +38,11 @@ const app = express();
 const allowedOrigins = [
   "http://localhost:3000",
   "http://localhost:5173",
-  "http://localhost:5174",
-  "http://localhost:5175",
-  "http://localhost:5176",
+
   "https://kashprime.com",
   "https://www.kashprime.com",
   "https://kashprime-production.up.railway.app",
-  "https://kashprime-production.up.railway.app/*"
+
 ];
 
 // Robust CORS implementation

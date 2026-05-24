@@ -1,10 +1,29 @@
 const { supabaseAdmin } = require('../services/supabase.service');
-require("dotenv").config();
+require("dotenv").config({ override: true });
 const crypto = require('crypto');
 const axios = require('axios');
 const { logActivity } = require('../utils/activityLogger');
 
 const paystack = require('paystack')(process.env.PAYSTACK_SECRET_KEY);
+
+const getFlutterwaveV3Credentials = () => ({
+  publicKey: process.env.FLUTTERWAVE_PUBLIC_KEY,
+  secretKey: process.env.FLUTTERWAVE_SECRET_KEY,
+});
+
+const getFlutterwaveConfigError = () => {
+  const { publicKey, secretKey } = getFlutterwaveV3Credentials();
+
+  if (publicKey && secretKey) {
+    return null;
+  }
+
+  if (process.env.FLUTTERWAVE_CLIENT_ID || process.env.FLUTTERWAVE_CLIENT_SECRET) {
+    return 'Flutterwave v4 credentials are configured, but this app still uses Flutterwave v3 Checkout. Add v3 live Public Key and Secret Key, or migrate the payment flow to v4.';
+  }
+
+  return 'Flutterwave v3 Public Key and Secret Key are not configured.';
+};
 
 class PaymentController {
   
@@ -216,9 +235,20 @@ class PaymentController {
         responseData.access_code = initialization.data.access_code;
       } 
       else if (gateway === 'flutterwave') {
+        const configError = getFlutterwaveConfigError();
+
+        if (configError) {
+          return res.status(400).json({
+            success: false,
+            message: configError
+          });
+        }
+
+        const { publicKey } = getFlutterwaveV3Credentials();
+
         // Flutterwave initialization (mostly for redirection flow, though inline is used on FE)
         // We still provide a reference and metadata
-        responseData.public_key = process.env.FLUTTERWAVE_PUBLIC_KEY;
+        responseData.public_key = publicKey;
         responseData.customer = {
           email: email || user.email,
           name: user.full_name,
@@ -298,6 +328,16 @@ class PaymentController {
         paidAmount = Number(verificationData.amount) / 100;
       } 
       else if (gateway === 'flutterwave') {
+        const configError = getFlutterwaveConfigError();
+
+        if (configError) {
+          return res.status(400).json({
+            success: false,
+            message: configError
+          });
+        }
+
+        const { secretKey } = getFlutterwaveV3Credentials();
         const idToVerify = flw_transaction_id;
         
         try {
@@ -311,7 +351,7 @@ class PaymentController {
 
           const response = await axios.get(verifyUrl, {
             headers: {
-              Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}`
+              Authorization: `Bearer ${secretKey}`
             }
           });
 
@@ -416,11 +456,21 @@ class PaymentController {
     try {
       const { transaction_id, tx_ref, amount, purpose } = req.body;
       const userId = req.user.id;
+      const configError = getFlutterwaveConfigError();
+
+      if (configError) {
+        return res.status(400).json({
+          success: false,
+          message: configError
+        });
+      }
+
+      const { secretKey } = getFlutterwaveV3Credentials();
 
       // 1. Verify with Flutterwave API
       const response = await axios.get(`https://api.flutterwave.com/v3/transactions/${transaction_id}/verify`, {
         headers: {
-          Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}`
+          Authorization: `Bearer ${secretKey}`
         }
       });
 
@@ -507,12 +557,15 @@ class PaymentController {
     try {
       const { getSettings } = require('./settings.controller');
       const settings = await getSettings();
+      const flutterwaveConfigError = getFlutterwaveConfigError();
 
       res.json({
         success: true,
         data: {
           paystack_enabled: settings['gateway_paystack_enabled'] === 'true',
-          flutterwave_enabled: settings['gateway_flutterwave_enabled'] === 'true'
+          flutterwave_enabled: settings['gateway_flutterwave_enabled'] === 'true',
+          flutterwave_configured: !flutterwaveConfigError,
+          flutterwave_unavailable_reason: flutterwaveConfigError
         }
       });
     } catch (error) {
