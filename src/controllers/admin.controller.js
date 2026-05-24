@@ -710,8 +710,6 @@ const processWithdrawal = async (req, res) => {
       });
     }
 
-    console.log(`=== PROCESSING WITHDRAWAL ${action.toUpperCase()}: ${transactionId} ===`);
-
     const { data: transaction, error: transError } = await supabaseAdmin
       .from('transactions')
       .select(`
@@ -749,8 +747,6 @@ const processWithdrawal = async (req, res) => {
         throw updateError;
       }
 
-      console.log('✅ Withdrawal approved successfully');
-
       await supabaseAdmin
         .from('admin_activities')
         .insert({
@@ -778,7 +774,6 @@ const processWithdrawal = async (req, res) => {
       });
 
     } else if (action === 'decline') {
-      console.log('Processing decline with refund...');
       const balanceType = transaction.balance_type || 'referral_balance';
       const balanceName = balanceType.replace('_balance', '');
       const totalWithdrawnField = `total_withdrawn_${balanceName}`;
@@ -852,8 +847,6 @@ const bulkProcessWithdrawals = async (req, res) => {
   try {
     const { transaction_ids, action, decline_reason = '' } = req.body;
 
-    console.log(`=== INITIATING BULK WITHDRAWAL PROCESSING: ${action} for ${transaction_ids.length} transactions ===`);
-
     if (!Array.isArray(transaction_ids) || transaction_ids.length === 0) {
       return res.status(400).json({
         status: 'error',
@@ -897,16 +890,12 @@ const bulkProcessWithdrawals = async (req, res) => {
       });
     }
 
-    console.log(`Found ${transactions.length} valid transactions to process`);
-
     const processedIds = [];
     const failedIds = [];
     let totalAmount = 0;
 
     for (const transaction of transactions) {
       try {
-        console.log(`Processing transaction ${transaction.id} for user ${transaction.users.username}`);
-
         if (action === 'approve') {
           const { error: updateError } = await supabaseAdmin
             .from('transactions')
@@ -923,7 +912,6 @@ const bulkProcessWithdrawals = async (req, res) => {
           if (!updateError) {
             processedIds.push(transaction.id);
             totalAmount += parseFloat(transaction.amount);
-            console.log(`✅ Approved transaction ${transaction.id}`);
           } else {
             console.error(`Failed to approve transaction ${transaction.id}:`, updateError);
             failedIds.push(transaction.id);
@@ -983,7 +971,6 @@ const bulkProcessWithdrawals = async (req, res) => {
           } else {
             processedIds.push(transaction.id);
             totalAmount += parseFloat(transaction.amount);
-            console.log(`✅ Refunded transaction ${transaction.id} to ${balanceType}`);
           }
         }
 
@@ -992,8 +979,6 @@ const bulkProcessWithdrawals = async (req, res) => {
         failedIds.push(transaction.id);
       }
     }
-
-    console.log(`Bulk processing completed: ${processedIds.length} successful, ${failedIds.length} failed`);
 
     await supabaseAdmin
       .from('admin_activities')
@@ -1480,14 +1465,12 @@ const processKashcoinPayments = async (req, res) => {
         }
       };
 
-      console.log(`[PAYOUT] Attempting to log transaction for user ${userId}...`);
       const { data: txData, error: txError } = await supabaseAdmin.from('transactions').insert(txRecord).select().single();
 
       if (txError) {
         console.error(`[PAYOUT ERROR] Database rejected transaction for user ${userId}:`, txError);
         results.push({ user_id: userId, status: 'partial_success', message: txError.message });
       } else {
-        console.log(`[PAYOUT SUCCESS] Transaction recorded with ID: ${txData?.id}`);
         results.push({ user_id: userId, status: 'success', transaction_id: txData?.id });
       }
     }

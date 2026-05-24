@@ -299,7 +299,6 @@ class PaymentController {
       } 
       else if (gateway === 'flutterwave') {
         const idToVerify = flw_transaction_id;
-        console.log(`[Verification] Verifying Flutterwave ID: ${idToVerify}`);
         
         try {
           // If we have an ID, use the direct ID verify endpoint
@@ -307,7 +306,6 @@ class PaymentController {
           let verifyUrl = `https://api.flutterwave.com/v3/transactions/${idToVerify}/verify`;
           
           if (!idToVerify || idToVerify === reference) {
-             console.log(`[Verification] No transaction ID, using reference: ${reference}`);
              verifyUrl = `https://api.flutterwave.com/v3/transactions/verify_by_reference?tx_ref=${reference}`;
           }
 
@@ -339,8 +337,6 @@ class PaymentController {
           // Follow Paystack pattern: ensure we have clear numeric amount
           paidAmount = parseFloat(verificationData.amount || verificationData.charged_amount || 0);
           
-          console.log(`[Verification] Flutterwave verification successful. Amount: ${paidAmount}`);
-          
         } catch (flwError) {
           console.error('[Verification] Flutterwave verify error:', flwError.response?.data || flwError.message);
           return res.status(400).json({
@@ -350,8 +346,6 @@ class PaymentController {
           });
         }
       }
-
-      console.log(`[Verification] Gateway: ${gateway}, Paid Amount: ${paidAmount}, Expected: ${amount}`);
 
       // Check if payment amount matches
       if (isNaN(paidAmount) || Math.abs(paidAmount - parseFloat(amount)) > 1) { 
@@ -422,8 +416,6 @@ class PaymentController {
     try {
       const { transaction_id, tx_ref, amount, purpose } = req.body;
       const userId = req.user.id;
-
-      console.log(`[FLW Dedicated] Verifying ID: ${transaction_id}, Ref: ${tx_ref}`);
 
       // 1. Verify with Flutterwave API
       const response = await axios.get(`https://api.flutterwave.com/v3/transactions/${transaction_id}/verify`, {
@@ -615,8 +607,6 @@ class PaymentController {
     const currentBalance = parseFloat(wallet.games_balance || 0);
     const depositAmount = parseFloat(paidAmount || 0);
     const newBalance = currentBalance + depositAmount;
-
-    console.log(`[Deposit] User: ${userId}, Current: ${currentBalance}, Deposited: ${depositAmount}, New: ${newBalance}`);
 
     // 2. Update wallet balance
     const { error: walletError } = await supabaseAdmin
@@ -1192,13 +1182,6 @@ static async processUpgrade(userId, paidAmount, reference, verificationData, gat
 
       if (event.event === 'charge.success') {
         const { reference, amount, customer, metadata } = event.data;
-        
-        console.log('Webhook received for successful payment:', {
-          reference,
-          amount: amount / 100,
-          purpose: metadata?.purpose,
-          user_id: metadata?.user_id
-        });
       }
 
       res.status(200).json({ success: true });
@@ -1324,8 +1307,6 @@ static async processUpgrade(userId, paidAmount, reference, verificationData, gat
           },
           created_at: new Date().toISOString()
         });
-
-      console.log(`Referral commission of ${commissionAmount} paid to ${user.referred_by}`);
 
     } catch (error) {
       console.error('Error processing referral commission:', error);
