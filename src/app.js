@@ -25,14 +25,14 @@ const sponsoredPostRoutes = require("./routes/sponsored.posts.routes");
 const kashAdsRoutes = require("./routes/kashAdsRoutes");
 const hub88Routes = require("./routes/hub88.routes");
 const spinWheelRoutes = require('./routes/spinWheel.routes');
-const diceRollRoutes  = require('./routes/diceRoll.routes');
-const plinkoRoutes    = require('./routes/plinko.routes');
+const diceRollRoutes = require('./routes/diceRoll.routes');
+const plinkoRoutes = require('./routes/plinko.routes');
 const colorPickRoutes = require('./routes/colorPick.routes');
 const higherLowerRoutes = require('./routes/higherLower.routes');
 const towerClimbRoutes = require('./routes/towerClimb.routes');
 const scratchCardRoutes = require('./routes/scratchCard.routes');
 const kenoRoutes = require('./routes/keno.routes');
-  
+
 const app = express();
 
 const allowedOrigins = [
@@ -43,7 +43,8 @@ const allowedOrigins = [
   "http://localhost:5176",
   "https://kashprime.com",
   "https://www.kashprime.com",
-  "https://kashprime.netlify.app"
+  "https://kashprime-production.up.railway.app",
+  "https://kashprime-production.up.railway.app/*"
 ];
 
 // Robust CORS implementation
@@ -89,14 +90,14 @@ app.use(
     ],
     optionsSuccessStatus: 200,
   })
-);      
-  
-           
+);
+
+
 // Security middleware
 app.use(helmet({
   crossOriginResourcePolicy: { policy: "cross-origin" },
   contentSecurityPolicy: false, // Disable CSP for local dev if needed, or configure it properly
-}));  
+}));
 
 // // Rate limiting
 // const limiter = rateLimit({
@@ -137,13 +138,13 @@ app.use("/api/investments", investmentsRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/hub88", hub88Routes);
 app.use('/api/spin-wheel', spinWheelRoutes);
-app.use('/api/dice-roll',  diceRollRoutes);
-app.use('/api/plinko',     plinkoRoutes);
-app.use('/api/color-pick',  colorPickRoutes);
+app.use('/api/dice-roll', diceRollRoutes);
+app.use('/api/plinko', plinkoRoutes);
+app.use('/api/color-pick', colorPickRoutes);
 app.use('/api/higher-lower', higherLowerRoutes);
-app.use('/api/tower-climb',  towerClimbRoutes);
+app.use('/api/tower-climb', towerClimbRoutes);
 app.use('/api/scratch-card', scratchCardRoutes);
-app.use('/api/keno',         kenoRoutes);
+app.use('/api/keno', kenoRoutes);
 app.use("/api/withdrawal", withdrawalRoutes);
 // app.use("/api/live-button", liveButtonRoutes);
 // app.use("/api/transfer", transferRoutes);
@@ -166,7 +167,7 @@ app.use((req, res, next) => {
     message: `Route ${req.originalUrl} not found`,
   });
 });
-    
+
 // Global error handler
 app.use((err, req, res, next) => {
   console.error(err.stack);
