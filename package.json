@@ -40,10 +40,10 @@
     "morgan": "^1.10.1",
     "multer": "^2.0.2",
     "node-cron": "^4.2.1",
+    "node-fetch": "^2.7.0",
     "nodemailer": "^7.0.6",
     "paystack": "^2.0.1",
     "sharp": "^0.34.3",
-    "undici": "^8.3.0",
     "uuid": "^11.1.0"
   },
   "devDependencies": {
