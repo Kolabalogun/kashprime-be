@@ -1,3 +1,12 @@
+// Polyfill Web API globals (fetch, Headers, Request, Response) for Node.js environments
+if (!globalThis.fetch || !globalThis.Headers) {
+  const undici = require('undici');
+  if (!globalThis.fetch) globalThis.fetch = undici.fetch;
+  if (!globalThis.Headers) globalThis.Headers = undici.Headers;
+  if (!globalThis.Request) globalThis.Request = undici.Request;
+  if (!globalThis.Response) globalThis.Response = undici.Response;
+}
+
 const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 

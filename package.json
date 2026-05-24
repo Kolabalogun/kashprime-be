@@ -1,7 +1,7 @@
 {
   "name": "kashprime-backend",
   "version": "1.0.0",
-  "description": "KASHPRIME Platform Backend API - Multi-feature platform combining affiliate marketing, gaming, social media monetization, and investment opportunities",
+  "description": "KASHPRIME Platform Backend API - Multi-feature platform combining affiliate marketing, gaming, social media monetization, and play-to-earn opportunities",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -43,6 +43,7 @@
     "nodemailer": "^7.0.6",
     "paystack": "^2.0.1",
     "sharp": "^0.34.3",
+    "undici": "^8.3.0",
     "uuid": "^11.1.0"
   },
   "devDependencies": {
