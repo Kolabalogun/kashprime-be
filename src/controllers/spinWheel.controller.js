@@ -8,6 +8,7 @@ const {
   generateTransactionReference,
 } = require('../utils/helpers/spinWheel.helpers');
 const { logActivity } = require('../utils/activityLogger');
+const { getPlayableBalance, settleGameStake } = require('../utils/helpers/wallet.helpers');
 
 // ─── GET SETTINGS ────────────────────────────────────────────────────────────
 const getSettings = async (req, res) => {
@@ -66,7 +67,7 @@ const playGame = async (req, res) => {
     // Get wallet balance
     const { data: wallet, error: walletErr } = await supabaseAdmin
       .from('wallets')
-      .select('games_balance, withdrawable_balance')
+      .select('bonus_balance, games_balance, withdrawable_balance')
       .eq('user_id', userId)
       .single();
 
@@ -74,9 +75,7 @@ const playGame = async (req, res) => {
       return res.status(400).json({ status: 'error', message: 'Could not retrieve wallet' });
     }
 
-    const gamesBalance = parseFloat(wallet.games_balance || 0);
-    const withdrawableBalance = parseFloat(wallet.withdrawable_balance || 0);
-    const totalPlayableBalance = gamesBalance + withdrawableBalance;
+    const totalPlayableBalance = getPlayableBalance(wallet);
 
     const validation = validateStakeAmount(stakeAmount, minStake, totalPlayableBalance);
     if (!validation.valid) {
@@ -87,29 +86,18 @@ const playGame = async (req, res) => {
     const { segment, isWin } = generateSpinResult(winRate, segments);
     const { payout, profit } = calculatePayout(stakeAmount, segment.multiplier);
 
-    let newGamesBalance = gamesBalance;
-    let newWithdrawableBalance = withdrawableBalance;
-
-    if (gamesBalance >= stakeAmount) {
-      newGamesBalance -= stakeAmount;
-    } else {
-      const remainder = stakeAmount - gamesBalance;
-      newGamesBalance = 0;
-      newWithdrawableBalance -= remainder;
+    const settlement = settleGameStake(wallet, stakeAmount, payout);
+    if (!settlement.ok) {
+      return res.status(400).json({ status: 'error', message: settlement.error });
     }
-
-    if (isWin) {
-      newWithdrawableBalance += payout;
-    }
-
-    const newTotalBal = parseFloat((newGamesBalance + newWithdrawableBalance).toFixed(2));
 
     // Update wallet (games_balance instead of gaming_wallet for Kashprime convention)
     const { error: walletUpdateErr } = await supabaseAdmin
       .from('wallets')
       .update({ 
-        games_balance: parseFloat(newGamesBalance.toFixed(2)),
-        withdrawable_balance: parseFloat(newWithdrawableBalance.toFixed(2)),
+        bonus_balance: settlement.balances.bonus_balance,
+        games_balance: settlement.balances.games_balance,
+        withdrawable_balance: settlement.balances.withdrawable_balance,
         updated_at: new Date().toISOString() 
       })
       .eq('user_id', userId);
@@ -191,7 +179,8 @@ const playGame = async (req, res) => {
           status:         isWin ? 'won' : 'lost',
           created_at:     round?.created_at,
         },
-        new_games_balance: newTotalBal,
+        new_games_balance: settlement.totalPlayableBalance,
+        wallet: settlement.balances,
       },
     });
   } catch (err) {

@@ -62,7 +62,7 @@ router.get('/users', [
   query('page').optional().isInt({ min: 1 }),
   query('limit').optional().isInt({ min: 1, max: 100 }),
   query('search').optional().isLength({ max: 100 }),
-  query('role').optional().isIn(['user', 'merchant', 'manager', 'admin']),
+  query('role').optional().isIn(['user', 'merchant', 'manager', 'admin', 'demo']),
   query('user_tier').optional().isIn(['Free', 'Amateur', 'Pro']),
   query('account_status').optional().isIn(['active', 'suspended', 'banned']),
   query('sort_by').optional().isIn(['created_at', 'username', 'full_name', 'user_tier']),
@@ -84,7 +84,7 @@ router.get('/users/:userId', [
 router.put('/users/:userId/status', [
   body('account_status').optional().isIn(['active', 'suspended', 'banned']),
   body('user_tier').optional().isIn(['Free', 'Amateur', 'Pro']),
-  body('role').optional().isIn(['user', 'merchant', 'manager', 'admin'])
+  body('role').optional().isIn(['user', 'merchant', 'manager', 'admin', 'demo'])
 ], adminController.updateUserStatus);
 
 // ==================== WITHDRAWAL MANAGEMENT ROUTES ====================

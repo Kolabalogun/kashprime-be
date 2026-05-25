@@ -13,6 +13,7 @@ const {
   parsePlatformSetting
 } = require('../utils/helpers/coinflip.helpers');
 const { logActivity } = require('../utils/activityLogger');
+const { getPlayableBalance, settleGameStake } = require('../utils/helpers/wallet.helpers');
 
 /**
  * Get coinflip game settings
@@ -132,7 +133,7 @@ const playGame = async (req, res) => {
     // Get user's gaming wallet balance
     const { data: wallet, error: walletError } = await supabaseAdmin
       .from('wallets')
-      .select('games_balance, withdrawable_balance')
+      .select('bonus_balance, games_balance, withdrawable_balance')
       .eq('user_id', userId)
       .single();
 
@@ -143,9 +144,7 @@ const playGame = async (req, res) => {
       });
     }
 
-    const gamesBalance = parseFloat(wallet.games_balance || 0);
-    const withdrawableBalance = parseFloat(wallet.withdrawable_balance || 0);
-    const totalPlayableBalance = gamesBalance + withdrawableBalance;
+    const totalPlayableBalance = getPlayableBalance(wallet);
 
     // Validate stake amount
     const validation = validateStakeAmount(stake_amount, minStake, totalPlayableBalance);
@@ -169,22 +168,10 @@ const playGame = async (req, res) => {
       profitLoss = payoutCalc.profit;
     }
 
-    let newGamesBalance = gamesBalance;
-    let newWithdrawableBalance = withdrawableBalance;
-
-    if (gamesBalance >= stake_amount) {
-      newGamesBalance -= stake_amount;
-    } else {
-      const remainder = stake_amount - gamesBalance;
-      newGamesBalance = 0;
-      newWithdrawableBalance -= remainder;
+    const settlement = settleGameStake(wallet, stake_amount, payoutAmount);
+    if (!settlement.ok) {
+      return res.status(400).json({ status: 'error', message: settlement.error });
     }
-    
-    if (isWin) {
-      newWithdrawableBalance += payoutAmount;
-    }
-
-    const newTotalBal = parseFloat((newGamesBalance + newWithdrawableBalance).toFixed(2));
 
     // Create game round
     const { data: round, error: roundError } = await supabaseAdmin
@@ -214,8 +201,9 @@ const playGame = async (req, res) => {
     const { error: updateError } = await supabaseAdmin
       .from('wallets')
       .update({ 
-        games_balance: parseFloat(newGamesBalance.toFixed(2)),
-        withdrawable_balance: parseFloat(newWithdrawableBalance.toFixed(2))
+        bonus_balance: settlement.balances.bonus_balance,
+        games_balance: settlement.balances.games_balance,
+        withdrawable_balance: settlement.balances.withdrawable_balance
       })
       .eq('user_id', userId);
 
@@ -330,7 +318,8 @@ const playGame = async (req, res) => {
             status: round.status,
             created_at: round.created_at
           },
-          new_games_balance: newTotalBal
+          new_games_balance: settlement.totalPlayableBalance,
+          wallet: settlement.balances
         }
       });
     } else {
@@ -350,7 +339,8 @@ const playGame = async (req, res) => {
             status: round.status,
             created_at: round.created_at
           },
-          new_games_balance: newTotalBal
+          new_games_balance: settlement.totalPlayableBalance,
+          wallet: settlement.balances
         }
       });
     }

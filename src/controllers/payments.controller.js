@@ -659,15 +659,31 @@ class PaymentController {
       throw new Error(`Wallet record not found or inaccessible for user ${userId}`);
     }
 
-    const currentBalance = parseFloat(wallet.games_balance || 0);
+    const currentGamesBalance = parseFloat(wallet.games_balance || 0);
+    const currentBonusBalance = parseFloat(wallet.bonus_balance || 0);
     const depositAmount = parseFloat(paidAmount || 0);
-    const newBalance = currentBalance + depositAmount;
+    const { data: previousGamingDeposit } = await supabaseAdmin
+      .from('transactions')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('transaction_type', 'deposit')
+      .in('balance_type', ['games_balance', 'bonus_balance'])
+      .limit(1)
+      .maybeSingle();
+
+    const isFirstGamingDeposit = !previousGamingDeposit;
+    const bonusAmount = isFirstGamingDeposit ? parseFloat((depositAmount * 0.5).toFixed(2)) : 0;
+    const creditAmount = depositAmount + bonusAmount;
+    const targetBalanceType = isFirstGamingDeposit ? 'bonus_balance' : 'games_balance';
+    const newGamesBalance = isFirstGamingDeposit ? currentGamesBalance : currentGamesBalance + depositAmount;
+    const newBonusBalance = isFirstGamingDeposit ? currentBonusBalance + creditAmount : currentBonusBalance;
 
     // 2. Update wallet balance
     const { error: walletError } = await supabaseAdmin
       .from('wallets')
       .update({
-        games_balance: newBalance,
+        games_balance: newGamesBalance,
+        bonus_balance: newBonusBalance,
         updated_at: new Date().toISOString()
       })
       .eq('id', wallet.id); // Use wallet ID for more precise update
@@ -683,16 +699,23 @@ class PaymentController {
       .insert({
         user_id: userId,
         transaction_type: 'deposit',
-        balance_type: 'games_balance',
-        amount: depositAmount,
+        balance_type: targetBalanceType,
+        amount: creditAmount,
         currency: 'NGN',
         status: 'completed',
         reference: reference,
-        description: `Gaming wallet funding via ${gatewayName}`,
+        description: isFirstGamingDeposit
+          ? `First gaming deposit via ${gatewayName} with 50% bonus`
+          : `Gaming wallet funding via ${gatewayName}`,
         metadata: {
           ...verificationData,
-          previous_balance: currentBalance,
-          new_balance: newBalance,
+          deposit_amount: depositAmount,
+          bonus_amount: bonusAmount,
+          first_deposit_bonus_applied: isFirstGamingDeposit,
+          previous_games_balance: currentGamesBalance,
+          previous_bonus_balance: currentBonusBalance,
+          new_games_balance: newGamesBalance,
+          new_bonus_balance: newBonusBalance,
           processed_at: new Date().toISOString()
         },
         created_at: new Date().toISOString()
@@ -710,15 +733,18 @@ class PaymentController {
     // Log Activity
     await logActivity(userId, 'deposit_complete', {
       amount: paidAmount,
-      balance_type: 'games_balance',
-      before_balance: currentBalance,
-      after_balance: newBalance,
+      balance_type: targetBalanceType,
+      before_balance: isFirstGamingDeposit ? currentBonusBalance : currentGamesBalance,
+      after_balance: isFirstGamingDeposit ? newBonusBalance : newGamesBalance,
       reference_id: reference,
       status: 'success'
     });
 
     return {
-      new_games_balance: newBalance,
+      new_games_balance: newGamesBalance,
+      new_bonus_balance: newBonusBalance,
+      first_deposit_bonus_applied: isFirstGamingDeposit,
+      bonus_amount: bonusAmount,
       wallet_type: 'gaming'
     };
   }

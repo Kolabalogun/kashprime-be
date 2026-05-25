@@ -328,6 +328,26 @@ const requestWithdrawal = async (req, res) => {
     const { amount } = req.body;
     const userId = req.user.id;
 
+    const { data: user, error: userError } = await supabaseAdmin
+      .from('users')
+      .select('role')
+      .eq('id', userId)
+      .single();
+
+    if (userError || !user) {
+      return res.status(404).json({
+        status: 'error',
+        message: 'User not found'
+      });
+    }
+
+    if (user.role === 'demo') {
+      return res.status(403).json({
+        status: 'error',
+        message: 'Demo accounts cannot request withdrawals.'
+      });
+    }
+
     const { data: withdrawalSetting } = await supabaseAdmin
       .from('platform_settings')
       .select('setting_value')

@@ -1,7 +1,7 @@
 const express = require('express');
 const authController = require('../controllers/auth.controller');
 const { validateRegistration, validateLogin, validateForgotPassword, validateResetPassword, validateUpdatePassword, validateMerchantAssignment } = require('../utils/validators/auth');
-const { authMiddleware, requireAdmin,   } = require('../middleware/auth.middleware');
+const { authMiddleware, requireAdmin, } = require('../middleware/auth.middleware');
 
 const authRouter = express.Router();
 
@@ -23,7 +23,7 @@ authRouter.get('/referrals', authController.getUserReferrals);
 authRouter.post('/logout', authController.logout);
 authRouter.put('/update-password', validateUpdatePassword, authController.updatePassword);
 
- 
- 
+
+
 
 module.exports = authRouter;

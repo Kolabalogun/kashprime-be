@@ -132,6 +132,7 @@ const getDashboard = async (req, res) => {
       },
       wallet: user.wallets || {
         coins_balance: 0,
+        bonus_balance: 0,
         games_balance: 0,
         referral_balance: 0,
         investment_balance: 0,
@@ -364,6 +365,10 @@ const getWalletDetails = async (req, res) => {
       games_balance: {
         current: parseFloat(wallet.games_balance || 0),
         total_withdrawn: parseFloat(wallet.total_withdrawn_games || 0)
+      },
+      bonus_balance: {
+        current: parseFloat(wallet.bonus_balance || 0),
+        total_withdrawn: 0
       },
       referral_balance: {
         current: parseFloat(wallet.referral_balance || 0),

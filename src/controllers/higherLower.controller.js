@@ -1,6 +1,7 @@
 const { supabaseAdmin } = require('../services/supabase.service');
 const { logActivity } = require('../utils/activityLogger');
 const crypto = require('crypto');
+const { getPlayableBalance, settleGameStake } = require('../utils/helpers/wallet.helpers');
 const {
   parsePlatformSetting, getBothMultipliers,
   generateShownNumber, generateResultNumber, generateTransactionReference, validateStake
@@ -90,13 +91,11 @@ const placeBet = async (req, res) => {
     const minStake  = parseFloat(parsePlatformSetting(map.higher_lower_min_stake, '50'));
     const houseEdge = parseFloat(parsePlatformSetting(map.higher_lower_house_edge, '0.05'));
 
-    const { data: wallet } = await supabaseAdmin.from('wallets').select('games_balance, withdrawable_balance').eq('user_id', userId).single();
+    const { data: wallet } = await supabaseAdmin.from('wallets').select('bonus_balance, games_balance, withdrawable_balance').eq('user_id', userId).single();
     if (!wallet)
       return res.status(400).json({ status: 'error', message: 'Could not retrieve wallet' });
 
-    const gamesBalance = parseFloat(wallet.games_balance || 0);
-    const withdrawableBalance = parseFloat(wallet.withdrawable_balance || 0);
-    const totalPlayableBalance = gamesBalance + withdrawableBalance;
+    const totalPlayableBalance = getPlayableBalance(wallet);
 
     const val = validateStake(stakeAmount, minStake, totalPlayableBalance);
     if (!val.valid)
@@ -107,32 +106,21 @@ const placeBet = async (req, res) => {
     const resultNumber = generateResultNumber(round.shown_number, direction, playerWins);
     const isWin        = direction === 'higher' ? resultNumber > round.shown_number : resultNumber < round.shown_number;
 
-    let newGamesBalance = gamesBalance;
-    let newWithdrawableBalance = withdrawableBalance;
-
-    if (gamesBalance >= stakeAmount) {
-      newGamesBalance -= stakeAmount;
-    } else {
-      const remainder = stakeAmount - gamesBalance;
-      newGamesBalance = 0;
-      newWithdrawableBalance -= remainder;
-    }
-
     const { getBothMultipliers: getMultis } = require('../utils/helpers/higherLower.helpers');
     const multiplier = getMultis(round.shown_number, houseEdge)[direction];
     const payout  = isWin ? parseFloat((stakeAmount * multiplier).toFixed(2)) : 0;
     const profit  = parseFloat((payout - stakeAmount).toFixed(2));
     
-    if (isWin) {
-      newWithdrawableBalance += payout;
+    const settlement = settleGameStake(wallet, stakeAmount, payout);
+    if (!settlement.ok) {
+      return res.status(400).json({ status: 'error', message: settlement.error });
     }
-
-    const newTotalBal = parseFloat((newGamesBalance + newWithdrawableBalance).toFixed(2));
 
     await supabaseAdmin.from('wallets')
       .update({ 
-        games_balance: parseFloat(newGamesBalance.toFixed(2)), 
-        withdrawable_balance: parseFloat(newWithdrawableBalance.toFixed(2)),
+        bonus_balance: settlement.balances.bonus_balance,
+        games_balance: settlement.balances.games_balance, 
+        withdrawable_balance: settlement.balances.withdrawable_balance,
         updated_at: new Date().toISOString() 
       })
       .eq('user_id', userId);
@@ -177,7 +165,8 @@ const placeBet = async (req, res) => {
         payout_amount:  payout,
         profit_loss:    profit,
         status:         isWin ? 'won' : 'lost',
-        new_gaming_wallet_balance: newTotalBal
+        new_gaming_wallet_balance: settlement.totalPlayableBalance,
+        wallet: settlement.balances
       }
     });
   } catch (err) {

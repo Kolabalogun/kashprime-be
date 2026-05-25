@@ -1,5 +1,6 @@
 const { supabaseAdmin } = require('../services/supabase.service');
 const { logActivity } = require('../utils/activityLogger');
+const { getPlayableBalance, settleGameStake } = require('../utils/helpers/wallet.helpers');
 const {
   DEFAULT_MULTIPLIERS, VALID_RISKS, VALID_ROWS,
   parsePlatformSetting, generatePlinkoResult,
@@ -66,47 +67,34 @@ const playGame = async (req, res) => {
 
     // Get wallet
     const { data: wallet, error: wErr } = await supabaseAdmin
-      .from('wallets').select('games_balance, withdrawable_balance').eq('user_id', userId).single();
+      .from('wallets').select('bonus_balance, games_balance, withdrawable_balance').eq('user_id', userId).single();
 
     if (wErr || !wallet)
       return res.status(400).json({ status: 'error', message: 'Could not retrieve wallet' });
 
-    const gamesBalance = parseFloat(wallet.games_balance || 0);
-    const withdrawableBalance = parseFloat(wallet.withdrawable_balance || 0);
-    const totalPlayableBalance = gamesBalance + withdrawableBalance;
+    const totalPlayableBalance = getPlayableBalance(wallet);
 
     const validation = validateStakeAmount(stakeAmount, minStake, totalPlayableBalance);
     if (!validation.valid)
       return res.status(400).json({ status: 'error', message: validation.error });
-
-    let newGamesBalance = gamesBalance;
-    let newWithdrawableBalance = withdrawableBalance;
-
-    if (gamesBalance >= stakeAmount) {
-      newGamesBalance -= stakeAmount;
-    } else {
-      const remainder = stakeAmount - gamesBalance;
-      newGamesBalance = 0;
-      newWithdrawableBalance -= remainder;
-    }
 
     // Generate result
     const { finalSlot, path, multiplier, isWin } = generatePlinkoResult(rowCount, risk_level, winRate, multipliers);
     const payout  = parseFloat((stakeAmount * multiplier).toFixed(2));
     const profit  = parseFloat((payout - stakeAmount).toFixed(2));
     
-    if (isWin) {
-      newWithdrawableBalance += payout;
+    const settlement = settleGameStake(wallet, stakeAmount, isWin ? payout : 0);
+    if (!settlement.ok) {
+      return res.status(400).json({ status: 'error', message: settlement.error });
     }
-
-    const newTotalBal = parseFloat((newGamesBalance + newWithdrawableBalance).toFixed(2));
 
     // Update wallet
     const { error: updateErr } = await supabaseAdmin
       .from('wallets')
       .update({ 
-        games_balance: parseFloat(newGamesBalance.toFixed(2)), 
-        withdrawable_balance: parseFloat(newWithdrawableBalance.toFixed(2)),
+        bonus_balance: settlement.balances.bonus_balance,
+        games_balance: settlement.balances.games_balance, 
+        withdrawable_balance: settlement.balances.withdrawable_balance,
         updated_at: new Date().toISOString() 
       })
       .eq('user_id', userId);
@@ -186,7 +174,8 @@ const playGame = async (req, res) => {
           status:        isWin ? 'won' : 'lost',
           created_at:    round?.created_at,
         },
-        new_games_balance: newTotalBal,
+        new_games_balance: settlement.totalPlayableBalance,
+        wallet: settlement.balances,
       },
     });
   } catch (err) {

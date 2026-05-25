@@ -10,6 +10,7 @@ const {
   validateStakeAmount
 } = require('../utils/helpers/mines.helpers');
 const { logActivity } = require('../utils/activityLogger');
+const { allocateStake, getPlayableBalance, settlePayoutFromAllocation } = require('../utils/helpers/wallet.helpers');
 
 /**
  * Get Mines game settings
@@ -117,13 +118,11 @@ const startGame = async (req, res) => {
 
     const { data: wallet } = await supabaseAdmin
       .from('wallets')
-      .select('games_balance, withdrawable_balance')
+      .select('bonus_balance, games_balance, withdrawable_balance')
       .eq('user_id', userId)
       .single();
 
-    const gamesBalance = parseFloat(wallet.games_balance || 0);
-    const withdrawableBalance = parseFloat(wallet.withdrawable_balance || 0);
-    const totalPlayableBalance = gamesBalance + withdrawableBalance;
+    const totalPlayableBalance = getPlayableBalance(wallet);
 
     const minStake = parseFloat(settingsMap.mines_min_stake || 50);
     const validation = validateStakeAmount(stake_amount, minStake, totalPlayableBalance);
@@ -138,22 +137,20 @@ const startGame = async (req, res) => {
     const stake = parseFloat(stake_amount);
     const bombPositions = generateBombPositions(bomb_count);
     
-    let newGamesBalance = gamesBalance;
-    let newWithdrawableBalance = withdrawableBalance;
-
-    if (gamesBalance >= stake) {
-      newGamesBalance -= stake;
-    } else {
-      const remainder = stake - gamesBalance;
-      newGamesBalance = 0;
-      newWithdrawableBalance -= remainder;
+    const stakeAllocation = allocateStake(wallet, stake);
+    if (!stakeAllocation.hasEnoughBalance) {
+      return res.status(400).json({
+        status: 'error',
+        message: `Insufficient balance. You have ${formatCurrency(totalPlayableBalance)}`
+      });
     }
     
     const { error: walletError } = await supabaseAdmin
       .from('wallets')
       .update({ 
-        games_balance: parseFloat(newGamesBalance.toFixed(2)), 
-        withdrawable_balance: parseFloat(newWithdrawableBalance.toFixed(2)) 
+        bonus_balance: stakeAllocation.balances.bonus_balance,
+        games_balance: stakeAllocation.balances.games_balance, 
+        withdrawable_balance: stakeAllocation.balances.withdrawable_balance 
       })
       .eq('user_id', userId);
 
@@ -174,7 +171,7 @@ const startGame = async (req, res) => {
     if (roundError) {
       await supabaseAdmin
         .from('wallets')
-        .update({ games_balance: gamesBalance, withdrawable_balance: withdrawableBalance })
+        .update({ bonus_balance: wallet.bonus_balance || 0, games_balance: wallet.games_balance || 0, withdrawable_balance: wallet.withdrawable_balance || 0 })
         .eq('user_id', userId);
       throw roundError;
     }
@@ -193,7 +190,8 @@ const startGame = async (req, res) => {
         game: 'mines',
         round_id: round.id,
         bomb_count: bomb_count,
-        stake_amount: stake
+        stake_amount: stake,
+        stake_allocation: stakeAllocation.allocation
       }
     });
 
@@ -211,7 +209,8 @@ const startGame = async (req, res) => {
           multipliers: bombConfig.multipliers,
           max_clicks: bombConfig.levels
         },
-        new_games_balance: (newGamesBalance + newWithdrawableBalance).toFixed(2)
+        new_games_balance: stakeAllocation.balances.bonus_balance + stakeAllocation.balances.games_balance + stakeAllocation.balances.withdrawable_balance,
+        wallet: stakeAllocation.balances
       }
     });
   } catch (error) {
@@ -272,13 +271,11 @@ const processGameResult = async (req, res) => {
 
     const { data: wallet } = await supabaseAdmin
       .from('wallets')
-      .select('games_balance, withdrawable_balance')
+      .select('bonus_balance, games_balance, withdrawable_balance')
       .eq('user_id', userId)
       .single();
 
-    const gamesBalance = parseFloat(wallet.games_balance || 0);
-    const withdrawableBalance = parseFloat(wallet.withdrawable_balance || 0);
-    const totalPlayableBalance = gamesBalance + withdrawableBalance;
+    const totalPlayableBalance = getPlayableBalance(wallet);
 
     let endedAt = new Date().toISOString();
     
@@ -344,12 +341,19 @@ const processGameResult = async (req, res) => {
       multiplierConfig
     );
 
-    const newWithdrawableBalance = withdrawableBalance + payout;
-    const newTotalBal = gamesBalance + newWithdrawableBalance;
+    const { data: stakeTx } = await supabaseAdmin
+      .from('transactions')
+      .select('metadata')
+      .eq('user_id', userId)
+      .eq('earning_type', 'mines_stake')
+      .contains('metadata', { round_id: roundId })
+      .maybeSingle();
+    const settlement = settlePayoutFromAllocation(wallet, stakeTx?.metadata?.stake_allocation, parseFloat(round.stake_amount), payout);
     
     await supabaseAdmin.from('wallets').update({ 
-      games_balance: parseFloat(gamesBalance.toFixed(2)),
-      withdrawable_balance: parseFloat(newWithdrawableBalance.toFixed(2)) 
+      bonus_balance: settlement.balances.bonus_balance,
+      games_balance: settlement.balances.games_balance,
+      withdrawable_balance: settlement.balances.withdrawable_balance 
     }).eq('user_id', userId);
     
     await supabaseAdmin.from('mines_rounds').update({
@@ -403,7 +407,8 @@ const processGameResult = async (req, res) => {
           profit_loss: profit,
           ended_at: endedAt
         },
-        new_games_balance: newTotalBal.toFixed(2)
+        new_games_balance: settlement.totalPlayableBalance,
+        wallet: settlement.balances
       }
     });
   } catch (error) {

@@ -96,6 +96,7 @@ const registerUser = async (userData) => {
       {
         user_id: newUser.id,
         coins_balance: 0,
+        bonus_balance: 0,
         games_balance: 0,
         referral_balance: 0,
         investment_balance: 0,
@@ -294,6 +295,7 @@ const getUserProfile = async (userId) => {
       created_at: user.created_at,
       wallet: wallet || {
         games_balance: 0,
+        bonus_balance: 0,
         referral_balance: 0,
         investment_balance: 0,
         coins_balance: 0,
@@ -579,10 +581,12 @@ const getUserEarnings = async (userId) => {
     // Calculate total earnings by balance type
     const totalEarnings = {
       games_balance: parseFloat(wallet.games_balance || 0),
+      bonus_balance: parseFloat(wallet.bonus_balance || 0),
       referral_balance: parseFloat(wallet.referral_balance || 0),
       investment_balance: parseFloat(wallet.investment_balance || 0),
       coins_balance: parseFloat(wallet.coins_balance || 0),
       total: parseFloat(wallet.games_balance || 0) + 
+             parseFloat(wallet.bonus_balance || 0) +
              parseFloat(wallet.referral_balance || 0) + 
              parseFloat(wallet.investment_balance || 0) + 
              parseFloat(wallet.coins_balance || 0)

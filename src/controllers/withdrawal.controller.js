@@ -38,6 +38,12 @@ const createWithdrawalRequest = async (req, res) => {
         message: 'User not found'
       });
     }
+    if (user.role === 'demo') {
+      return res.status(403).json({
+        status: 'error',
+        message: 'Demo accounts cannot request withdrawals.'
+      });
+    }
     const userTier = user.user_tier || 'Free';
     // Get withdrawal limits from platform settings
     const settingKeys = [

@@ -1,6 +1,42 @@
 const { supabaseAdmin } = require('../services/supabase.service');
 const { decryptPassword } = require('../utils/helpers');
 
+const DEMO_ROLE = 'demo';
+
+const getDemoUserIds = async () => {
+  const { data, error } = await supabaseAdmin
+    .from('users')
+    .select('id')
+    .eq('role', DEMO_ROLE);
+
+  if (error) throw error;
+  return new Set((data || []).map((user) => user.id));
+};
+
+const getRealUserIds = async ({ includeAdmins = true } = {}) => {
+  let query = supabaseAdmin
+    .from('users')
+    .select('id')
+    .neq('role', DEMO_ROLE);
+
+  if (!includeAdmins) {
+    query = query.neq('role', 'admin');
+  }
+
+  const { data, error } = await query;
+  if (error) throw error;
+  return (data || []).map((user) => user.id);
+};
+
+const filterOutDemoRows = (rows = [], demoUserIds = new Set(), key = 'user_id') => (
+  (rows || []).filter((row) => !demoUserIds.has(row?.[key]))
+);
+
+const excludeDemoUsersFromQuery = (query, demoUserIds = new Set(), column = 'user_id') => {
+  if (!demoUserIds.size) return query;
+  return query.not(column, 'in', `(${Array.from(demoUserIds).join(',')})`);
+};
+
 // ==================== USER MANAGEMENT ====================
 
 const getAllUsers = async (req, res) => {
@@ -538,11 +574,18 @@ const updateUserStatus = async (req, res) => {
     if (user_tier) updateData.user_tier = user_tier;
     if (role) updateData.role = role;
 
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'No user fields provided for update'
+      });
+    }
+
     const { data: updatedUser, error } = await supabaseAdmin
       .from('users')
       .update(updateData)
       .eq('id', userId)
-      .select()
+      .select('id, username, email, role, user_tier, account_status')
       .single();
 
     if (error) throw error;
@@ -554,6 +597,14 @@ const updateUserStatus = async (req, res) => {
         activity_type: 'user_updated',
         description: `Updated user: ${updatedUser.username}`,
         metadata: { userId, changes: updateData }
+      })
+      .then(({ error: activityError }) => {
+        if (activityError) {
+          console.warn('Admin activity log failed after user update:', activityError.message);
+        }
+      })
+      .catch((activityError) => {
+        console.warn('Admin activity log request failed after user update:', activityError.message);
       });
 
     res.status(200).json({
@@ -575,6 +626,7 @@ const updateUserStatus = async (req, res) => {
 
 const getPendingWithdrawals = async (req, res) => {
   try {
+    const demoUserIds = await getDemoUserIds();
     const {
       page = 1,
       limit = 20,
@@ -587,7 +639,7 @@ const getPendingWithdrawals = async (req, res) => {
 
     const offset = (page - 1) * limit;
 
-    let query = supabaseAdmin
+    let query = excludeDemoUsersFromQuery(supabaseAdmin
       .from('transactions')
       .select(`
         id, user_id, amount, currency, description, reference,
@@ -596,7 +648,7 @@ const getPendingWithdrawals = async (req, res) => {
       `)
       .eq('transaction_type', 'withdrawal')
       .range(offset, offset + parseInt(limit) - 1)
-      .order(sort_by, { ascending: sort_order === 'asc' });
+      .order(sort_by, { ascending: sort_order === 'asc' }), demoUserIds);
 
     // Status Filter
     if (status) {
@@ -615,6 +667,7 @@ const getPendingWithdrawals = async (req, res) => {
       const { data: searchUsers, error: userError } = await supabaseAdmin
         .from('users')
         .select('id')
+        .neq('role', DEMO_ROLE)
         .or(`username.ilike.%${search}%,full_name.ilike.%${search}%,email.ilike.%${search}%`);
       
       if (userError) throw userError;
@@ -644,10 +697,10 @@ const getPendingWithdrawals = async (req, res) => {
     const { data: withdrawals, error } = await query;
     if (error) throw error;
 
-    let countQuery = supabaseAdmin
+    let countQuery = excludeDemoUsersFromQuery(supabaseAdmin
       .from('transactions')
       .select('*', { count: 'exact', head: true })
-      .eq('transaction_type', 'withdrawal');
+      .eq('transaction_type', 'withdrawal'), demoUserIds);
 
     if (status) countQuery = countQuery.eq('status', status);
     if (balance_type) {
@@ -660,6 +713,7 @@ const getPendingWithdrawals = async (req, res) => {
       const { data: searchUsers, error: userError } = await supabaseAdmin
         .from('users')
         .select('id')
+        .neq('role', DEMO_ROLE)
         .or(`username.ilike.%${search}%,full_name.ilike.%${search}%,email.ilike.%${search}%`);
       
       if (userError) throw userError;
@@ -1028,62 +1082,52 @@ const bulkProcessWithdrawals = async (req, res) => {
 
 const getWithdrawalStatistics = async (req, res) => {
   try {
-    const { data: stats, error } = await supabaseAdmin
-      .rpc('get_withdrawal_stats');
-
-    if (error || !stats) {
-      if (error && error.code !== 'PGRST202') {
-        console.warn('RPC get_withdrawal_stats failed or missing, falling back to manual queries details:', error.message);
-      }
+    const demoUserIds = await getDemoUserIds();
       const [pendingResult, completedResult, cancelledResult] = await Promise.all([
         supabaseAdmin
           .from('transactions')
-          .select('amount', { count: 'exact' })
+          .select('amount, user_id')
           .eq('transaction_type', 'withdrawal')
           .eq('status', 'pending'),
         
         supabaseAdmin
           .from('transactions')
-          .select('amount', { count: 'exact' })
+          .select('amount, user_id')
           .eq('transaction_type', 'withdrawal')
           .eq('status', 'completed'),
         
         supabaseAdmin
           .from('transactions')
-          .select('amount', { count: 'exact' })
+          .select('amount, user_id')
           .eq('transaction_type', 'withdrawal')
           .eq('status', 'cancelled')
       ]);
 
-      const pendingAmount = pendingResult.data?.reduce((sum, t) => sum + parseFloat(t.amount), 0) || 0;
-      const completedAmount = completedResult.data?.reduce((sum, t) => sum + parseFloat(t.amount), 0) || 0;
-      const cancelledAmount = cancelledResult.data?.reduce((sum, t) => sum + parseFloat(t.amount), 0) || 0;
+      const pendingRows = filterOutDemoRows(pendingResult.data, demoUserIds);
+      const completedRows = filterOutDemoRows(completedResult.data, demoUserIds);
+      const cancelledRows = filterOutDemoRows(cancelledResult.data, demoUserIds);
+      const pendingAmount = pendingRows.reduce((sum, t) => sum + parseFloat(t.amount), 0) || 0;
+      const completedAmount = completedRows.reduce((sum, t) => sum + parseFloat(t.amount), 0) || 0;
+      const cancelledAmount = cancelledRows.reduce((sum, t) => sum + parseFloat(t.amount), 0) || 0;
 
       return res.status(200).json({
         status: 'success',
         message: 'Withdrawal statistics retrieved successfully',
         data: {
           pending: {
-            count: pendingResult.count || 0,
+            count: pendingRows.length,
             total_amount: pendingAmount
           },
           completed: {
-            count: completedResult.count || 0,
+            count: completedRows.length,
             total_amount: completedAmount
           },
           cancelled: {
-            count: cancelledResult.count || 0,
+            count: cancelledRows.length,
             total_amount: cancelledAmount
           }
         }
       });
-    }
-
-    res.status(200).json({
-      status: 'success',
-      message: 'Withdrawal statistics retrieved successfully',
-      data: stats
-    });
 
   } catch (error) {
     console.error('Get withdrawal statistics error:', error);
@@ -1102,6 +1146,7 @@ const getWithdrawalStatistics = async (req, res) => {
  */
 const getKashcoinStatistics = async (req, res) => {
   try {
+    const demoUserIds = await getDemoUserIds();
     // 1. Get Dynamic Payout Threshold
     const { data: settings } = await supabaseAdmin.from('platform_settings').select('setting_key, setting_value');
     const settingsMap = {};
@@ -1112,7 +1157,8 @@ const getKashcoinStatistics = async (req, res) => {
     // 2. Fetch High-Level Wallet Stats
     const { data: allWallets, error: walletError } = await supabaseAdmin
       .from('wallets')
-      .select('coins_balance, user_id');
+      .select('coins_balance, user_id, users!inner(role)')
+      .neq('users.role', DEMO_ROLE);
 
     if (walletError) throw walletError;
 
@@ -1136,11 +1182,12 @@ const getKashcoinStatistics = async (req, res) => {
       .gte('created_at', thirtyDaysAgo.toISOString());
 
     if (txError) throw txError;
+    const realRecentTransactions = filterOutDemoRows(recentTransactions, demoUserIds);
 
     // Aggregate Daily Earnings
     const dailyEarnings = {};
     
-    recentTransactions.forEach(tx => {
+    realRecentTransactions.forEach(tx => {
       const date = tx.created_at.split('T')[0];
       const amount = Math.abs(parseFloat(tx.amount));
       
@@ -1172,7 +1219,8 @@ const getKashcoinStatistics = async (req, res) => {
           users:user_id (
             username,
             full_name,
-            profile_picture
+            profile_picture,
+            role
           )
         `)
         .eq('balance_type', 'coins_balance');
@@ -1191,9 +1239,10 @@ const getKashcoinStatistics = async (req, res) => {
       }
 
       const { data } = await query;
+      const realData = (data || []).filter(tx => tx.users?.role !== DEMO_ROLE);
       
       const userSums = {};
-      data?.forEach(tx => {
+      realData.forEach(tx => {
         const uid = tx.user_id;
         if (!userSums[uid]) {
           userSums[uid] = { 
@@ -1230,12 +1279,12 @@ const getKashcoinStatistics = async (req, res) => {
     // 5. Total Coins Paid Out to Users
     const { data: allPayouts } = await supabaseAdmin
       .from('transactions')
-      .select('amount')
+      .select('amount, user_id')
       .eq('balance_type', 'coins_balance')
       .eq('transaction_type', 'withdrawal')
       .eq('status', 'completed');
 
-    const totalPaidOut = allPayouts?.reduce((sum, tx) => sum + Math.abs(parseFloat(tx.amount)), 0) || 0;
+    const totalPaidOut = filterOutDemoRows(allPayouts, demoUserIds).reduce((sum, tx) => sum + Math.abs(parseFloat(tx.amount)), 0) || 0;
 
     return res.status(200).json({
       status: 'success',
@@ -1302,10 +1351,11 @@ const getKashcoinEligibleUsers = async (req, res) => {
         account_name,
         bank_name,
         account_number,
-        users:user_id (
-          id, username, full_name, email, phone_number, created_at
+        users!inner (
+          id, username, full_name, email, phone_number, created_at, role
         )
       `)
+      .neq('users.role', DEMO_ROLE)
       .gte('coins_balance', threshold)
       .range(offset, offset + parseInt(limit) - 1)
       .order('coins_balance', { ascending: sort_order === 'asc' });
@@ -1317,6 +1367,7 @@ const getKashcoinEligibleUsers = async (req, res) => {
       const { data: searchUsers } = await supabaseAdmin
         .from('users')
         .select('id')
+        .neq('role', DEMO_ROLE)
         .or(`full_name.ilike.%${search}%,email.ilike.%${search}%,username.ilike.%${search}%`);
       
       if (searchUsers && searchUsers.length > 0) {
@@ -1337,13 +1388,15 @@ const getKashcoinEligibleUsers = async (req, res) => {
     // Count query
     let countQuery = supabaseAdmin
       .from('wallets')
-      .select('*', { count: 'exact', head: true })
+      .select('*, users!inner(role)', { count: 'exact', head: true })
+      .neq('users.role', DEMO_ROLE)
       .gte('coins_balance', threshold);
 
     if (search) {
       const { data: searchUsers } = await supabaseAdmin
         .from('users')
         .select('id')
+        .neq('role', DEMO_ROLE)
         .or(`full_name.ilike.%${search}%,email.ilike.%${search}%,username.ilike.%${search}%`);
       if (searchUsers) {
         countQuery = countQuery.in('user_id', searchUsers.map(u => u.id));
@@ -1567,11 +1620,13 @@ const updateSetting = async (req, res) => {
 
 const getDashboardStats = async (req, res) => {
   try {
+    const demoUserIds = await getDemoUserIds();
     // 1. User Stats
     const { data: users, error: userError } = await supabaseAdmin
       .from('users')
-      .select('user_tier, role, account_status')
-      .neq('role', 'admin');
+      .select('id, user_tier, role, account_status')
+      .neq('role', 'admin')
+      .neq('role', DEMO_ROLE);
 
     if (userError) throw userError;
 
@@ -1587,14 +1642,15 @@ const getDashboardStats = async (req, res) => {
     // 2. Pending Withdrawals
     const { data: pendingWithdrawals, error: withdrawError } = await supabaseAdmin
       .from('transactions')
-      .select('amount')
+      .select('amount, user_id')
       .eq('transaction_type', 'withdrawal')
       .eq('status', 'pending');
 
     if (withdrawError) throw withdrawError;
 
-    const pendingCount = pendingWithdrawals?.length || 0;
-    const pendingAmount = pendingWithdrawals?.reduce((sum, tx) => sum + Math.abs(parseFloat(tx.amount)), 0) || 0;
+    const realPendingWithdrawals = filterOutDemoRows(pendingWithdrawals, demoUserIds);
+    const pendingCount = realPendingWithdrawals?.length || 0;
+    const pendingAmount = realPendingWithdrawals?.reduce((sum, tx) => sum + Math.abs(parseFloat(tx.amount)), 0) || 0;
 
     // 3. Exact Revenue Breakdown (Free vs Pro)
     // Fetch all relevant completed transactions
@@ -1602,6 +1658,7 @@ const getDashboardStats = async (req, res) => {
       .from('transactions')
       .select('user_id, transaction_type, earning_type, amount')
       .eq('status', 'completed');
+    const realCompletedTx = filterOutDemoRows(completedTx, demoUserIds);
     
     const userTierMap = {};
     users.forEach(u => {
@@ -1616,7 +1673,7 @@ const getDashboardStats = async (req, res) => {
 
     let totalPlatformRevenue = 0;
 
-    (completedTx || []).forEach(tx => {
+    (realCompletedTx || []).forEach(tx => {
       const tier = userTierMap[tx.user_id] || 'Free';
       const amt = parseFloat(tx.amount) || 0;
       
@@ -1662,7 +1719,8 @@ const getDashboardStats = async (req, res) => {
     // 3. Wallet Analytics (Balance Breakdown)
     const { data: wallets, error: walletError } = await supabaseAdmin
       .from('wallets')
-      .select('games_balance, withdrawable_balance, referral_balance, coins_balance, investment_balance');
+      .select('games_balance, withdrawable_balance, referral_balance, coins_balance, investment_balance, users!inner(role)')
+      .neq('users.role', DEMO_ROLE);
 
     if (walletError) throw walletError;
 
@@ -1688,6 +1746,7 @@ const getDashboardStats = async (req, res) => {
     const { data: recentUsers } = await supabaseAdmin
       .from('users')
       .select('username, email, user_tier, created_at')
+      .neq('role', DEMO_ROLE)
       .order('created_at', { ascending: false })
       .limit(10);
 
@@ -1746,9 +1805,11 @@ const getTopEarners = async (req, res) => {
         investment_balance,
         users!inner (
           username,
-          user_tier
+          user_tier,
+          role
         )
       `)
+      .neq('users.role', DEMO_ROLE)
       .order('referral_balance', { ascending: false })
       .limit(10);
 
@@ -1790,6 +1851,7 @@ const getTopEarners = async (req, res) => {
 const getGameAnalytics = async (req, res) => {
   try {
     const { timeframe = 'daily' } = req.query;
+    const demoUserIds = await getDemoUserIds();
 
     const now = new Date();
     const dailyStart   = new Date(now); dailyStart.setHours(0, 0, 0, 0);
@@ -1842,6 +1904,7 @@ const getGameAnalytics = async (req, res) => {
       if (!error) allTxns = data || [];
       else console.warn('getGameAnalytics allTxns error:', error.message);
     } catch (e) { console.warn('getGameAnalytics allTxns catch:', e.message); }
+    allTxns = filterOutDemoRows(allTxns, demoUserIds);
 
     const txnsInRange = allTxns.filter(t => new Date(t.created_at) >= rangeStart);
     const txns30d     = allTxns.filter(t => new Date(t.created_at) >= thirtyDaysAgo);
@@ -1921,6 +1984,7 @@ const getGameAnalytics = async (req, res) => {
         .select('id, created_at')
         .gte('created_at', monthlyStart.toISOString())
         .neq('role', 'admin')
+        .neq('role', DEMO_ROLE)
         .order('created_at', { ascending: true });
 
       // Group by date label (day precision)
@@ -1964,7 +2028,8 @@ const getGameAnalytics = async (req, res) => {
       if (timeframe === 'all-time') {
         const { data: wallets } = await supabaseAdmin
           .from('wallets')
-          .select('games_balance, withdrawable_balance, users!inner(username, user_tier)')
+          .select('games_balance, withdrawable_balance, users!inner(username, user_tier, role)')
+          .neq('users.role', DEMO_ROLE)
           .order('withdrawable_balance', { ascending: false })
           .limit(10);
         topEarners = (wallets || []).map((w, i) => ({
@@ -2094,7 +2159,12 @@ const getGameAnalytics = async (req, res) => {
       }
 
       // ── Trigger 5: Pending Withdrawals ──
-      const { count: pc } = await supabaseAdmin.from('transactions').select('id', { count: 'exact', head: true }).eq('transaction_type', 'withdrawal').eq('status', 'pending');
+      const { data: pendingRows } = await supabaseAdmin
+        .from('transactions')
+        .select('id, user_id')
+        .eq('transaction_type', 'withdrawal')
+        .eq('status', 'pending');
+      const pc = filterOutDemoRows(pendingRows, demoUserIds).length;
       if (pc > 0) {
         alerts.push({ id: 'pending_w', type: 'warning', title: 'Pending Bank Payouts', details: `${pc} withdrawal requests are currently pending review.`, time: 'Action Required' });
       }
@@ -2199,6 +2269,7 @@ const getGameAnalytics = async (req, res) => {
 
 const getActivityAnalytics = async (req, res) => {
   try {
+    const demoUserIds = await getDemoUserIds();
     const timeframe = req.query.timeframe || 'daily';
     const now = new Date();
     let timeLimit = new Date();
@@ -2224,12 +2295,12 @@ const getActivityAnalytics = async (req, res) => {
 
     const { data: prevActivities } = await supabaseAdmin
       .from('kash_user_activities')
-      .select('action_type')
+      .select('action_type, user_id')
       .lt('created_at', timeLimit.toISOString())
       .gte('created_at', prevTimeLimit.toISOString());
 
-    const validActivities = activities || [];
-    const prevValidActivities = prevActivities || [];
+    const validActivities = filterOutDemoRows(activities, demoUserIds);
+    const prevValidActivities = filterOutDemoRows(prevActivities, demoUserIds);
 
     // ── Helper Logic (Sync with Game Analytics) ──
     const isWinType   = (t) => t && t.earning_type 
@@ -2244,6 +2315,7 @@ const getActivityAnalytics = async (req, res) => {
     const { data: newUsers } = await supabaseAdmin
       .from('users')
       .select('id, created_at')
+      .neq('role', DEMO_ROLE)
       .gte('created_at', timeLimit.toISOString());
 
     const activeFromActions = new Set(validActivities.map(a => a.user_id));
@@ -2254,7 +2326,7 @@ const getActivityAnalytics = async (req, res) => {
       .select('user_id')
       .gte('created_at', timeLimit.toISOString());
     
-    const activeFromTxns = new Set(recentTxnsUsers?.map(t => t.user_id));
+    const activeFromTxns = new Set(filterOutDemoRows(recentTxnsUsers, demoUserIds).map(t => t.user_id));
     const uniqueUsersSet = new Set([...activeFromActions, ...activeFromTxns]);
 
     const returningUsers = Array.from(uniqueUsersSet).filter(uid => !newUsers?.some(nu => nu.id === uid));
@@ -2265,27 +2337,30 @@ const getActivityAnalytics = async (req, res) => {
       .from('transactions')
       .select('*')
       .gte('created_at', timeLimit.toISOString());
+    const realTxns = filterOutDemoRows(txns, demoUserIds);
 
-    const totalTxns = txns?.length || 0;
-    const failed_txns = txns?.filter(t => t.status === 'failed')?.length || 0;
+    const totalTxns = realTxns?.length || 0;
+    const failed_txns = realTxns?.filter(t => t.status === 'failed')?.length || 0;
     
     // Revenue logic (Total Stakes - Total Rewards)
-    const inflow = (txns || []).filter(t => isStakeType(t) || ['ads_purchase', 'investment_start'].includes(t.transaction_type))
+    const inflow = (realTxns || []).filter(t => isStakeType(t) || ['ads_purchase', 'investment_start'].includes(t.transaction_type))
                                .reduce((sum, tx) => sum + Math.abs(parseFloat(tx.amount || 0)), 0);
-    const outflow = (txns || []).filter(t => isWinType(t) || ['reward', 'refund', 'commission'].includes(t.transaction_type))
+    const outflow = (realTxns || []).filter(t => isWinType(t) || ['reward', 'refund', 'commission'].includes(t.transaction_type))
                                 .reduce((sum, tx) => sum + Math.abs(parseFloat(tx.amount || 0)), 0);
     const totalRevenue = inflow - outflow;
     
     // Win Rate - Use All-time average to match Game Management Dashboard
-    const { data: allTxns } = await supabaseAdmin.from('transactions').select('transaction_type, earning_type, amount');
-    const allWinsCount = allTxns?.filter(t => isWinType(t))?.length || 0;
-    const allEntriesCount = allTxns?.filter(t => isStakeType(t))?.length || 0;
+    const { data: allTxns } = await supabaseAdmin.from('transactions').select('transaction_type, earning_type, amount, user_id');
+    const realAllTxns = filterOutDemoRows(allTxns, demoUserIds);
+    const allWinsCount = realAllTxns?.filter(t => isWinType(t))?.length || 0;
+    const allEntriesCount = realAllTxns?.filter(t => isStakeType(t))?.length || 0;
     const winRate = allEntriesCount > 0 ? ((allWinsCount / allEntriesCount) * 100).toFixed(1) : 0;
 
     // 4. Wallet Stats
     const { data: wallets } = await supabaseAdmin
       .from('wallets')
-      .select('games_balance, withdrawable_balance, coins_balance, referral_balance');
+      .select('games_balance, withdrawable_balance, coins_balance, referral_balance, users!inner(role)')
+      .neq('users.role', DEMO_ROLE);
     const allBalances = (wallets || []).map(w => parseFloat(w.games_balance || 0) + parseFloat(w.withdrawable_balance || 0) + parseFloat(w.coins_balance || 0) + parseFloat(w.referral_balance || 0));
     const walletStats = {
       avg: allBalances.length > 0 ? (allBalances.reduce((a,b)=>a+b,0)/allBalances.length).toFixed(0) : 0,
@@ -3048,4 +3123,3 @@ module.exports = {
   getMerchantDetail,
   loadVendingBalance
 };
-
