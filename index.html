@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -67,7 +68,9 @@
             color: #333;
         }
 
-        input, select, textarea {
+        input,
+        select,
+        textarea {
             width: 100%;
             padding: 12px;
             border: 2px solid #e0e0e0;
@@ -76,7 +79,9 @@
             transition: border-color 0.3s ease;
         }
 
-        input:focus, select:focus, textarea:focus {
+        input:focus,
+        select:focus,
+        textarea:focus {
             outline: none;
             border-color: #667eea;
             box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
@@ -192,8 +197,13 @@
         }
 
         @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
         }
 
         .search-box {
@@ -230,17 +240,18 @@
             .header h1 {
                 font-size: 2em;
             }
-            
+
             .main-content {
                 padding: 20px;
             }
-            
+
             .settings-grid {
                 grid-template-columns: 1fr;
             }
         }
     </style>
 </head>
+
 <body>
     <div class="container">
         <div class="header">
@@ -325,7 +336,7 @@
             statusDiv.className = `status-message ${isError ? 'status-error' : 'status-success'}`;
             statusDiv.textContent = message;
             statusDiv.style.display = 'block';
-            
+
             setTimeout(() => {
                 statusDiv.style.display = 'none';
             }, 5000);
@@ -351,7 +362,7 @@
                 showLoading(true);
                 const headers = getAuthHeaders();
                 const apiUrl = document.getElementById('apiUrl').value;
-                
+
                 const response = await fetch(apiUrl, {
                     method: 'GET',
                     headers: headers
@@ -374,7 +385,7 @@
                 showLoading(true);
                 const headers = getAuthHeaders();
                 const apiUrl = document.getElementById('apiUrl').value;
-                
+
                 const response = await fetch(apiUrl, {
                     method: 'GET',
                     headers: headers
@@ -385,17 +396,17 @@
                 }
 
                 const data = await response.json();
-                
+
                 // Parse the SQL INSERT data from the document
                 currentSettings = parseSettingsData();
-                
+
                 displaySettings(currentSettings);
                 updateStats(currentSettings);
-                
+
                 document.getElementById('updateSection').style.display = 'block';
                 document.getElementById('searchBox').style.display = 'block';
                 document.getElementById('stats').style.display = 'flex';
-                
+
                 showStatus(`✅ Successfully loaded ${currentSettings.length} settings`);
             } catch (error) {
                 showStatus(`❌ Failed to load settings: ${error.message}`, true);
@@ -407,7 +418,7 @@
         function parseSettingsData() {
             // Parse the SQL INSERT data from the provided document
             const sqlData = `INSERT INTO "public"."platform_settings" ("id", "setting_key", "setting_value", "description", "updated_by", "created_at", "updated_at") VALUES ('05f71457-94dc-49ae-9aa7-976987ddb4cc', 'package_rewards_amateur_welcome_bonus', 800', 'Welcome bonus for Amateur package users', null, '2025-10-06 23:47:09.085843+00', '2025-10-18 13:31:07.415649+00'), ('07af501e-3a01-4e19-9412-a2ac5d0e8384', 'kashfeed_enabled', tru', 'Enable/disable KASHFeed blogging platform', null, '2025-09-13 09:32:59.425187+00', '2025-09-13 09:32:59.425187+00'), ('0d78dd6a-97c6-41df-ac1a-f28fbff24a40', 'package_rewards_pro_welcome_bonus', 1200', 'Welcome bonus for Pro package users', null, '2025-10-06 23:47:09.085843+00', '2025-10-18 13:31:07.415649+00'), ('0e94ff84-5b08-409e-b726-1e1597034823', 'max_withdrawal_amount', 500000', 'Maximum withdrawal amount in NGN', '6a2e684e-a4c6-44c0-8813-e362d07fdb8f', '2025-09-13 09:32:59.425187+00', '2025-10-19 21:04:50.025+00'), ('0ea4eef9-9891-4720-ad2c-931536c3601d', 'package_rewards_pro_daily_kashcoin', 250', 'Daily KASHcoin gain for Pro package users', '6a2e684e-a4c6-44c0-8813-e362d07fdb8f', '2025-10-06 23:47:09.085843+00', '2025-10-19 21:08:11.456+00'), ('164fe814-2a31-4b80-a51b-6333e506d26e', 'min_withdrawal_amount', 500', 'Minimum withdrawal amount in NGN', '6a2e684e-a4c6-44c0-8813-e362d07fdb8f', '2025-09-13 09:32:59.425187+00', '2025-10-19 21:11:52.392+00'), ('171bb199-055a-4f38-b8a6-d32cf3949e9a', 'kashskit_reward_pro', 50', 'KASHcoin reward for Pro users per video', null, '2025-10-07 14:59:30.507813+00', '2025-10-07 14:59:30.507813+00'), ('1a135cdf-e34f-4b2f-b2ea-18bb1ec529f2', 'lucky_jet_enabled', tru', 'Enable/disable Lucky Jet game', '6a2e684e-a4c6-44c0-8813-e362d07fdb8f', '2025-10-14 23:50:09.932672+00', '2025-10-20 13:51:12.494+00'), ('1c2c6043-2dc2-488a-9b2c-baf6b5253335', 'package_rewards_amateur_referral_level3', 10', 'Tier 2 referral earnings for Amateur package', null, '2025-10-06 23:47:09.085843+00', '2025-10-18 13:31:07.415649+00'), ('1e66fe2c-a18e-4d25-8f3d-ee09e3566ba3', 'lucky_jet_max_multiplier', '', 'Maximum crash point multiplier (can be increased to 16.0)', null, '2025-10-14 23:50:09.932672+00', '2025-10-14 23:52:01.372463+00')`;
-            
+
             // This is a simplified parser - in a real scenario, you'd get this from the API
             // For now, let's create some sample settings based on the provided data
             return [
@@ -471,14 +482,14 @@
 
         function updateStats(settings) {
             document.getElementById('totalSettings').textContent = settings.length;
-            
-            const enabledFeatures = settings.filter(s => 
+
+            const enabledFeatures = settings.filter(s =>
                 s.setting_key.includes('enabled') && s.setting_value === 'true'
             ).length;
             document.getElementById('enabledFeatures').textContent = enabledFeatures;
-            
+
             const today = new Date().toISOString().split('T')[0];
-            const modifiedToday = settings.filter(s => 
+            const modifiedToday = settings.filter(s =>
                 s.updated_at.startsWith(today)
             ).length;
             document.getElementById('modifiedToday').textContent = modifiedToday;
@@ -528,11 +539,11 @@
 
                 const data = await response.json();
                 showStatus(`✅ Successfully updated ${settingKey} to ${settingValue}`);
-                
+
                 // Refresh the settings display
                 await loadSettings();
                 clearForm();
-                
+
             } catch (error) {
                 showStatus(`❌ Failed to update setting: ${error.message}`, true);
             } finally {
@@ -546,9 +557,10 @@
         }
 
         // Initialize the page
-        document.addEventListener('DOMContentLoaded', function() {
+        document.addEventListener('DOMContentLoaded', function () {
             showStatus('🚀 Platform Settings Manager loaded. Enter your API credentials and click "Load Settings" to begin.');
         });
     </script>
 </body>
+
 </html>

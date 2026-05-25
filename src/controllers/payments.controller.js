@@ -7,14 +7,16 @@ const { logActivity } = require('../utils/activityLogger');
 const paystack = require('paystack')(process.env.PAYSTACK_SECRET_KEY);
 
 const getFlutterwaveV3Credentials = () => ({
-  publicKey: process.env.FLUTTERWAVE_PUBLIC_KEY,
-  secretKey: process.env.FLUTTERWAVE_SECRET_KEY,
+  publicKey: (process.env.FLUTTERWAVE_PUBLIC_KEY || '').trim(),
+  secretKey: (process.env.FLUTTERWAVE_SECRET_KEY || '').trim(),
 });
 
 const getFlutterwaveConfigError = () => {
   const { publicKey, secretKey } = getFlutterwaveV3Credentials();
+  const hasV3PublicKey = publicKey.startsWith('FLWPUBK-');
+  const hasV3SecretKey = secretKey.startsWith('FLWSECK-');
 
-  if (publicKey && secretKey) {
+  if (hasV3PublicKey && hasV3SecretKey) {
     return null;
   }
 
@@ -26,7 +28,7 @@ const getFlutterwaveConfigError = () => {
 };
 
 class PaymentController {
-  
+
   // Initialize payment with purpose (gaming, investment, upgrade)
   static async initializePayment(req, res) {
     try {
@@ -87,8 +89,8 @@ class PaymentController {
           .eq('setting_key', 'tier_upgrade_cost')
           .single();
 
-        const expectedUpgradeCost = upgradeCostSetting 
-          ? parseFloat(upgradeCostSetting.setting_value) 
+        const expectedUpgradeCost = upgradeCostSetting
+          ? parseFloat(upgradeCostSetting.setting_value)
           : 2500;
 
         if (amount !== expectedUpgradeCost) {
@@ -195,13 +197,13 @@ class PaymentController {
         purpose: purpose,
         amount: amount,
         full_name: user.full_name,
-        description: purpose === 'gaming' 
-          ? 'Gaming wallet funding' 
+        description: purpose === 'gaming'
+          ? 'Gaming wallet funding'
           : purpose === 'investment'
-          ? `Investment - ${plan_name} plan`
-          : purpose === 'kash_ads'
-          ? 'Kash Ads Campaign Payment'
-          : 'Pro tier upgrade'
+            ? `Investment - ${plan_name} plan`
+            : purpose === 'kash_ads'
+              ? 'Kash Ads Campaign Payment'
+              : 'Pro tier upgrade'
       };
 
       if (purpose === 'investment' && investmentPlanConfig) {
@@ -211,7 +213,7 @@ class PaymentController {
       }
 
       let responseData = { reference, purpose };
-      
+
       if (gateway === 'paystack') {
         const paymentData = {
           email: email || user.email,
@@ -233,7 +235,7 @@ class PaymentController {
 
         responseData.authorization_url = initialization.data.authorization_url;
         responseData.access_code = initialization.data.access_code;
-      } 
+      }
       else if (gateway === 'flutterwave') {
         const configError = getFlutterwaveConfigError();
 
@@ -326,7 +328,7 @@ class PaymentController {
         }
         verificationData = verification.data;
         paidAmount = Number(verificationData.amount) / 100;
-      } 
+      }
       else if (gateway === 'flutterwave') {
         const configError = getFlutterwaveConfigError();
 
@@ -339,14 +341,14 @@ class PaymentController {
 
         const { secretKey } = getFlutterwaveV3Credentials();
         const idToVerify = flw_transaction_id;
-        
+
         try {
           // If we have an ID, use the direct ID verify endpoint
           // If we only have a reference, we should use verify_by_reference
           let verifyUrl = `https://api.flutterwave.com/v3/transactions/${idToVerify}/verify`;
-          
+
           if (!idToVerify || idToVerify === reference) {
-             verifyUrl = `https://api.flutterwave.com/v3/transactions/verify_by_reference?tx_ref=${reference}`;
+            verifyUrl = `https://api.flutterwave.com/v3/transactions/verify_by_reference?tx_ref=${reference}`;
           }
 
           const response = await axios.get(verifyUrl, {
@@ -376,7 +378,7 @@ class PaymentController {
           verificationData = response.data.data;
           // Follow Paystack pattern: ensure we have clear numeric amount
           paidAmount = parseFloat(verificationData.amount || verificationData.charged_amount || 0);
-          
+
         } catch (flwError) {
           console.error('[Verification] Flutterwave verify error:', flwError.response?.data || flwError.message);
           return res.status(400).json({
@@ -388,7 +390,7 @@ class PaymentController {
       }
 
       // Check if payment amount matches
-      if (isNaN(paidAmount) || Math.abs(paidAmount - parseFloat(amount)) > 1) { 
+      if (isNaN(paidAmount) || Math.abs(paidAmount - parseFloat(amount)) > 1) {
         console.warn(`[Verification] Amount mismatch or invalid: Paid ${paidAmount}, Expected ${amount}`);
         return res.status(400).json({
           success: false,
@@ -525,7 +527,7 @@ class PaymentController {
 
       // 4. Process deposit based on purpose
       let responseData = {};
-      
+
       if (purpose === 'gaming') {
         responseData = await PaymentController.processGamingDeposit(userId, paidAmount, tx_ref, verificationData, 'Flutterwave');
       } else if (purpose === 'investment') {
@@ -569,11 +571,11 @@ class PaymentController {
         }
       });
     } catch (error) {
-       console.error('Get public payment settings error:', error);
-       res.status(500).json({
-         success: false,
-         message: 'Failed to fetch payment settings'
-       });
+      console.error('Get public payment settings error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to fetch payment settings'
+      });
     }
   }
 
@@ -588,7 +590,7 @@ class PaymentController {
         .select('*')
         .eq('code', code.toUpperCase())
         .single();
-        
+
       if (codeError || !depositCode) {
         return res.status(400).json({ success: false, message: 'Invalid or non-existent deposit code' });
       }
@@ -599,8 +601,8 @@ class PaymentController {
       }
 
       const amount = parseFloat(depositCode.amount);
-      const reference = `LV_CODE_${code.substring(0,6)}_${Date.now()}`;
-      
+      const reference = `LV_CODE_${code.substring(0, 6)}_${Date.now()}`;
+
       // 3. Mark code as used immediately to prevent double spending
       const { error: updateError } = await supabaseAdmin
         .from('deposit_codes')
@@ -618,7 +620,7 @@ class PaymentController {
       if (purpose === 'gaming') {
         responseData = await PaymentController.processGamingDeposit(userId, amount, reference, { method: 'code_redemption', code_id: depositCode.id }, 'Code');
       } else if (purpose === 'investment') {
-         // Not fully supported natively via code unless plan passed, but mock it securely
+        // Not fully supported natively via code unless plan passed, but mock it securely
         return res.status(400).json({ success: false, message: 'Investment via code is not directly supported without plan context.' });
       } else if (purpose === 'upgrade') {
         responseData = await PaymentController.processUpgrade(userId, amount, reference, { method: 'code_redemption', code_id: depositCode.id }, 'Code');
@@ -636,7 +638,7 @@ class PaymentController {
           transaction_reference: reference
         }
       });
-      
+
     } catch (error) {
       console.error('Code redemption error:', error);
       res.status(500).json({ success: false, message: error.message || 'Internal server error' });
@@ -707,12 +709,12 @@ class PaymentController {
 
     // Log Activity
     await logActivity(userId, 'deposit_complete', {
-       amount: paidAmount,
-       balance_type: 'games_balance',
-       before_balance: currentBalance,
-       after_balance: newBalance,
-       reference_id: reference,
-       status: 'success'
+      amount: paidAmount,
+      balance_type: 'games_balance',
+      before_balance: currentBalance,
+      after_balance: newBalance,
+      reference_id: reference,
+      status: 'success'
     });
 
     return {
@@ -724,7 +726,7 @@ class PaymentController {
   // Process investment deposit and create investment
   static async processInvestmentDeposit(userId, paidAmount, reference, verificationData, gatewayName = 'Paystack') {
     const metadata = verificationData.metadata;
-    
+
     if (!metadata?.plan_name) {
       throw new Error('Investment plan information missing from payment');
     }
@@ -751,7 +753,7 @@ class PaymentController {
     const startDate = new Date();
     const nextPayoutDate = new Date(startDate);
     nextPayoutDate.setDate(nextPayoutDate.getDate() + 7);
-    
+
     const endDate = new Date(startDate);
     endDate.setDate(endDate.getDate() + (7 * 6));
 
@@ -788,7 +790,7 @@ class PaymentController {
     for (let week = 1; week <= 6; week++) {
       const scheduledDate = new Date(startDate);
       scheduledDate.setDate(scheduledDate.getDate() + (7 * week));
-      
+
       payoutRecords.push({
         investment_id: investment.id,
         user_id: userId,
@@ -835,10 +837,10 @@ class PaymentController {
 
     // Log Activity
     await logActivity(userId, 'investment_start', {
-       amount: capitalAmount,
-       plan_name: planName,
-       reference_id: reference,
-       status: 'success'
+      amount: capitalAmount,
+      plan_name: planName,
+      reference_id: reference,
+      status: 'success'
     });
 
     return {
@@ -859,119 +861,119 @@ class PaymentController {
   }
 
   // Process Pro upgrade with referral reward
-// Process Pro upgrade with referral reward
-static async processUpgrade(userId, paidAmount, reference, verificationData, gatewayName = 'Paystack') {
-  // Get user with referrer info
-  const { data: user } = await supabaseAdmin
-    .from('users')
-    .select('id, username, full_name, user_tier, referred_by')
-    .eq('id', userId)
-    .single();
+  // Process Pro upgrade with referral reward
+  static async processUpgrade(userId, paidAmount, reference, verificationData, gatewayName = 'Paystack') {
+    // Get user with referrer info
+    const { data: user } = await supabaseAdmin
+      .from('users')
+      .select('id, username, full_name, user_tier, referred_by')
+      .eq('id', userId)
+      .single();
 
-  if (user?.user_tier === 'Pro') {
-    throw new Error('You are already a Pro user');
-  }
+    if (user?.user_tier === 'Pro') {
+      throw new Error('You are already a Pro user');
+    }
 
-  // Get Pro upgrade bonus from platform settings
-  const { data: proUpgradeSetting } = await supabaseAdmin
-    .from('platform_settings')
-    .select('setting_value')
-    .eq('setting_key', 'pro_upgrade_bonus')
-    .single();
+    // Get Pro upgrade bonus from platform settings
+    const { data: proUpgradeSetting } = await supabaseAdmin
+      .from('platform_settings')
+      .select('setting_value')
+      .eq('setting_key', 'pro_upgrade_bonus')
+      .single();
 
-  const upgradeBonus = proUpgradeSetting 
-    ? parseFloat(proUpgradeSetting.setting_value) 
-    : 5000;
+    const upgradeBonus = proUpgradeSetting
+      ? parseFloat(proUpgradeSetting.setting_value)
+      : 5000;
 
-  // Get referral reward amount from platform settings
-  const { data: referralRewardSetting } = await supabaseAdmin
-    .from('platform_settings')
-    .select('setting_value')
-    .eq('setting_key', 'referral_reward_amount')
-    .single();
+    // Get referral reward amount from platform settings
+    const { data: referralRewardSetting } = await supabaseAdmin
+      .from('platform_settings')
+      .select('setting_value')
+      .eq('setting_key', 'referral_reward_amount')
+      .single();
 
-  const referralRewardAmount = referralRewardSetting 
-    ? parseFloat(referralRewardSetting.setting_value) 
-    : 500;
+    const referralRewardAmount = referralRewardSetting
+      ? parseFloat(referralRewardSetting.setting_value)
+      : 500;
 
-  // Update user tier to Pro
-  await supabaseAdmin
-    .from('users')
-    .update({
-      user_tier: 'Pro',
-      updated_at: new Date().toISOString()
-    })
-    .eq('id', userId);
+    // Update user tier to Pro
+    await supabaseAdmin
+      .from('users')
+      .update({
+        user_tier: 'Pro',
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', userId);
 
-  // Award upgrade bonus to coins_balance
-  const { data: currentWallet } = await supabaseAdmin
-    .from('wallets')
-    .select('coins_balance')
-    .eq('user_id', userId)
-    .single();
+    // Award upgrade bonus to coins_balance
+    const { data: currentWallet } = await supabaseAdmin
+      .from('wallets')
+      .select('coins_balance')
+      .eq('user_id', userId)
+      .single();
 
-  const newCoinsBalance = parseFloat(currentWallet.coins_balance || 0) + upgradeBonus;
+    const newCoinsBalance = parseFloat(currentWallet.coins_balance || 0) + upgradeBonus;
 
-  await supabaseAdmin
-    .from('wallets')
-    .update({
-      coins_balance: newCoinsBalance,
-      updated_at: new Date().toISOString()
-    })
-    .eq('user_id', userId);
+    await supabaseAdmin
+      .from('wallets')
+      .update({
+        coins_balance: newCoinsBalance,
+        updated_at: new Date().toISOString()
+      })
+      .eq('user_id', userId);
 
-  let responseData = {
-    new_tier: 'Pro',
-    upgrade_bonus: upgradeBonus,
-    new_coins_balance: newCoinsBalance
-  };
+    let responseData = {
+      new_tier: 'Pro',
+      upgrade_bonus: upgradeBonus,
+      new_coins_balance: newCoinsBalance
+    };
 
-  // Record upgrade payment transaction
-  await supabaseAdmin
-    .from('transactions')
-    .insert({
-      user_id: userId,
-      transaction_type: 'upgrade_payment',
-      balance_type: 'coins_balance',
-      amount: paidAmount,
-      currency: 'NGN',
-      status: 'completed',
-      reference: reference,
-      description: `Pro tier upgrade payment via ${gatewayName}`,
-      metadata: verificationData,
-      created_at: new Date().toISOString()
-    });
+    // Record upgrade payment transaction
+    await supabaseAdmin
+      .from('transactions')
+      .insert({
+        user_id: userId,
+        transaction_type: 'upgrade_payment',
+        balance_type: 'coins_balance',
+        amount: paidAmount,
+        currency: 'NGN',
+        status: 'completed',
+        reference: reference,
+        description: `Pro tier upgrade payment via ${gatewayName}`,
+        metadata: verificationData,
+        created_at: new Date().toISOString()
+      });
 
-  // Record upgrade bonus transaction
-  await supabaseAdmin
-    .from('transactions')
-    .insert({
-      user_id: userId,
-      transaction_type: 'reward',
-      balance_type: 'coins_balance',
-      amount: upgradeBonus,
-      currency: 'NGN',
-      status: 'completed',
-      description: 'Pro upgrade bonus - Welcome to Pro tier!',
-      metadata: {
-        previous_tier: 'Free',
-        new_tier: 'Pro',
-        upgrade_reference: reference
-      },
-      created_at: new Date().toISOString()
-    });
+    // Record upgrade bonus transaction
+    await supabaseAdmin
+      .from('transactions')
+      .insert({
+        user_id: userId,
+        transaction_type: 'reward',
+        balance_type: 'coins_balance',
+        amount: upgradeBonus,
+        currency: 'NGN',
+        status: 'completed',
+        description: 'Pro upgrade bonus - Welcome to Pro tier!',
+        metadata: {
+          previous_tier: 'Free',
+          new_tier: 'Pro',
+          upgrade_reference: reference
+        },
+        created_at: new Date().toISOString()
+      });
 
     // Log Activity
     await logActivity(userId, 'tier_upgrade', {
-       amount: paidAmount,
-       bonus_awarded: upgradeBonus,
-       new_tier: 'Pro',
-       reference_id: reference,
-       status: 'success'
+      amount: paidAmount,
+      bonus_awarded: upgradeBonus,
+      new_tier: 'Pro',
+      reference_id: reference,
+      status: 'success'
     });
 
-  return responseData;
-}
+    return responseData;
+  }
 
   // Process Kash Ads payment
   static async processAdPayment(userId, paidAmount, reference, verificationData, gatewayName = 'Paystack') {
@@ -993,9 +995,9 @@ static async processUpgrade(userId, paidAmount, reference, verificationData, gat
 
     // Log Activity
     await logActivity(userId, 'ad_payment', {
-       amount: paidAmount,
-       reference_id: reference,
-       status: 'success'
+      amount: paidAmount,
+      reference_id: reference,
+      status: 'success'
     });
 
     return {
@@ -1009,9 +1011,9 @@ static async processUpgrade(userId, paidAmount, reference, verificationData, gat
     try {
       const userId = req.user.id;
       const { page = 1, limit = 20, type, purpose } = req.query;
-      
+
       const offset = (page - 1) * limit;
-      
+
       let query = supabaseAdmin
         .from('transactions')
         .select(`
@@ -1101,9 +1103,9 @@ static async processUpgrade(userId, paidAmount, reference, verificationData, gat
   static async getAllPaymentTransactions(req, res) {
     try {
       const { page = 1, limit = 50, purpose, status, user_id, date_from, date_to } = req.query;
-      
+
       const offset = (page - 1) * limit;
-      
+
       let query = supabaseAdmin
         .from('transactions')
         .select(`
@@ -1166,7 +1168,7 @@ static async processUpgrade(userId, paidAmount, reference, verificationData, gat
       // Calculate totals
       const totals = transactions.reduce((acc, t) => {
         let purposeKey = 'other';
-        
+
         if (t.transaction_type === 'deposit' && t.balance_type === 'games_balance') {
           purposeKey = 'gaming';
         } else if (t.transaction_type === 'deposit' && t.balance_type === 'investment_balance') {
@@ -1176,14 +1178,14 @@ static async processUpgrade(userId, paidAmount, reference, verificationData, gat
         } else if (t.transaction_type === 'reward') {
           purposeKey = 'reward';
         }
-        
+
         if (!acc[purposeKey]) {
           acc[purposeKey] = { count: 0, total_amount: 0 };
         }
-        
+
         acc[purposeKey].count += 1;
         acc[purposeKey].total_amount += parseFloat(t.amount);
-        
+
         return acc;
       }, {});
 
