@@ -3,6 +3,24 @@ const path = require('path');
 const { logActivity } = require('../utils/activityLogger');
 const { v4: uuidv4 } = require('uuid');
 
+const DEMO_ROLE = 'demo';
+const ADMIN_ROLE = 'admin';
+const EXCLUDED_STATS_ROLES = [DEMO_ROLE, ADMIN_ROLE];
+
+const getDemoUserIds = async () => {
+  const { data, error } = await supabaseAdmin
+    .from('users')
+    .select('id')
+    .in('role', EXCLUDED_STATS_ROLES);
+
+  if (error) throw error;
+  return new Set((data || []).map((user) => user.id));
+};
+
+const filterOutDemoRows = (rows = [], demoUserIds = new Set(), key = 'user_id') => (
+  (rows || []).filter((row) => !demoUserIds.has(row?.[key]))
+);
+
 // ==================== USER ENDPOINTS ====================
 
  
@@ -440,6 +458,7 @@ const uploadVideo = async (req, res) => {
 
 const getAllVideos = async (req, res) => {
   try {
+    const demoUserIds = await getDemoUserIds();
     const {
       page = 1,
       limit = 20,
@@ -466,11 +485,44 @@ const getAllVideos = async (req, res) => {
     const { data: videos, error, count } = await query;
     if (error) throw error;
 
+    const { data: allVideos } = await supabaseAdmin
+      .from('kashskit_videos')
+      .select('id, is_active');
+
+    const { data: allClaims } = await supabaseAdmin
+      .from('kashskit_user_claims')
+      .select('video_id, user_id, reward_amount');
+
+    const realClaims = filterOutDemoRows(allClaims, demoUserIds);
+    const claimsByVideo = realClaims.reduce((acc, claim) => {
+      if (!acc[claim.video_id]) {
+        acc[claim.video_id] = { claims_count: 0, rewards: 0 };
+      }
+      acc[claim.video_id].claims_count += 1;
+      acc[claim.video_id].rewards += parseFloat(claim.reward_amount || 0);
+      return acc;
+    }, {});
+
+    const videosWithoutDemoStats = (videos || []).map((video) => {
+      const realStats = claimsByVideo[video.id] || { claims_count: 0 };
+      return {
+        ...video,
+        claims_count: realStats.claims_count,
+        views_count: realStats.claims_count
+      };
+    });
+
     res.status(200).json({
       status: 'success',
       message: 'Videos retrieved successfully',
       data: {
-        videos,
+        videos: videosWithoutDemoStats,
+        overview: {
+          total_videos: allVideos?.length || count || 0,
+          active_videos: (allVideos || []).filter((video) => video.is_active).length,
+          total_claims: realClaims.length,
+          total_rewards_distributed: realClaims.reduce((sum, claim) => sum + parseFloat(claim.reward_amount || 0), 0)
+        },
         pagination: {
           current_page: parseInt(page),
           total_pages: Math.ceil((count || 0) / limit),
@@ -493,6 +545,7 @@ const getAllVideos = async (req, res) => {
 
 const getVideoDetails = async (req, res) => {
   try {
+    const demoUserIds = await getDemoUserIds();
     const { videoId } = req.params;
 
     const { data: video, error: videoError } = await supabaseAdmin
@@ -512,22 +565,28 @@ const getVideoDetails = async (req, res) => {
     const { data: claims } = await supabaseAdmin
       .from('kashskit_user_claims')
       .select(`
-        id, reward_amount, claimed_at,
+        id, user_id, reward_amount, claimed_at,
         users (id, username, full_name, user_tier)
       `)
       .eq('video_id', videoId)
-      .order('claimed_at', { ascending: false })
-      .limit(50);
+      .order('claimed_at', { ascending: false });
+
+    const realClaims = filterOutDemoRows(claims, demoUserIds);
 
     res.status(200).json({
       status: 'success',
       message: 'Video details retrieved successfully',
       data: {
-        video,
-        claims: claims || [],
+        video: {
+          ...video,
+          claims_count: realClaims.length,
+          views_count: realClaims.length
+        },
+        claims: (realClaims || []).slice(0, 50),
         statistics: {
-          total_claims: video.claims_count,
-          total_views: video.views_count
+          total_claims: realClaims.length,
+          total_views: realClaims.length,
+          total_rewards_distributed: realClaims.reduce((sum, claim) => sum + parseFloat(claim.reward_amount || 0), 0)
         }
       }
     });

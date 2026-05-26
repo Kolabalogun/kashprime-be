@@ -2,12 +2,14 @@ const { supabaseAdmin } = require('../services/supabase.service');
 const { decryptPassword } = require('../utils/helpers');
 
 const DEMO_ROLE = 'demo';
+const ADMIN_ROLE = 'admin';
+const EXCLUDED_STATS_ROLES = [DEMO_ROLE, ADMIN_ROLE];
 
 const getDemoUserIds = async () => {
   const { data, error } = await supabaseAdmin
     .from('users')
     .select('id')
-    .eq('role', DEMO_ROLE);
+    .in('role', EXCLUDED_STATS_ROLES);
 
   if (error) throw error;
   return new Set((data || []).map((user) => user.id));
@@ -20,7 +22,7 @@ const getRealUserIds = async ({ includeAdmins = true } = {}) => {
     .neq('role', DEMO_ROLE);
 
   if (!includeAdmins) {
-    query = query.neq('role', 'admin');
+    query = query.neq('role', ADMIN_ROLE);
   }
 
   const { data, error } = await query;
@@ -35,6 +37,80 @@ const filterOutDemoRows = (rows = [], demoUserIds = new Set(), key = 'user_id') 
 const excludeDemoUsersFromQuery = (query, demoUserIds = new Set(), column = 'user_id') => {
   if (!demoUserIds.size) return query;
   return query.not(column, 'in', `(${Array.from(demoUserIds).join(',')})`);
+};
+
+const isGameStakeType = (tx) => (
+  tx?.earning_type
+    ? tx.earning_type.endsWith('_stake') || tx.earning_type === 'stake' || tx.earning_type === 'bet'
+    : tx?.transaction_type === 'gaming' && parseFloat(tx.amount || 0) < 0 && !tx?.earning_type?.endsWith('_loss')
+);
+
+const isGameWinType = (tx) => (
+  tx?.earning_type
+    ? tx.earning_type.endsWith('_win') || tx.earning_type === 'win' || tx.earning_type === 'cashout'
+    : tx?.transaction_type === 'gaming' && parseFloat(tx.amount || 0) > 0
+);
+
+const emptyRevenueBucket = () => ({
+  deposits: 0,
+  upgrades: 0,
+  game_stakes: 0,
+  game_payouts: 0,
+  game_house_edge: 0,
+  ad_revenue: 0,
+  investment_inflow: 0,
+  payouts: 0,
+  bonuses: 0,
+  referrals: 0,
+  net_revenue: 0
+});
+
+const applyRevenueTransaction = (bucket, tx) => {
+  const amt = Math.abs(parseFloat(tx.amount || 0));
+  if (!amt) return;
+
+  if (tx.transaction_type === 'upgrade_payment') {
+    bucket.upgrades += amt;
+  } else if (tx.transaction_type === 'deposit') {
+    if (tx.balance_type === 'investment_balance') {
+      bucket.investment_inflow += amt;
+    } else if (tx.balance_type === 'kash_ads') {
+      bucket.ad_revenue += amt;
+    } else {
+      bucket.deposits += amt;
+    }
+  } else if (tx.transaction_type === 'subscription') {
+    bucket.upgrades += amt;
+  } else if (tx.transaction_type === 'gaming') {
+    if (isGameStakeType(tx)) {
+      bucket.game_stakes += amt;
+      bucket.game_house_edge += amt;
+    } else if (isGameWinType(tx)) {
+      bucket.game_payouts += amt;
+      bucket.game_house_edge -= amt;
+    }
+  } else if (['ad_payment', 'sponsored_post_payment'].includes(tx.transaction_type)) {
+    bucket.ad_revenue += amt;
+  } else if (tx.transaction_type === 'withdrawal') {
+    bucket.payouts += amt;
+  } else if (tx.transaction_type === 'reward' || tx.transaction_type === 'bonus') {
+    bucket.bonuses += amt;
+  } else if (tx.transaction_type === 'referral_bonus' || tx.transaction_type === 'referral') {
+    bucket.referrals += amt;
+  } else if (tx.transaction_type === 'investment_start') {
+    bucket.investment_inflow += amt;
+  }
+};
+
+const finalizeRevenueBucket = (bucket) => {
+  bucket.net_revenue =
+    bucket.upgrades +
+    bucket.game_house_edge +
+    bucket.ad_revenue -
+    bucket.payouts -
+    bucket.bonuses -
+    bucket.referrals;
+  return bucket;
 };
 
 // ==================== USER MANAGEMENT ====================
@@ -64,7 +140,7 @@ const getAllUsers = async (req, res) => {
           id, username, email
         ),
         wallets (
-          games_balance, withdrawable_balance, referral_balance, investment_balance, coins_balance,
+          games_balance, withdrawable_balance, bonus_balance, referral_balance, investment_balance, coins_balance,
           total_withdrawn_games, total_withdrawn_withdrawable, total_withdrawn_referral, 
           total_withdrawn_investment, total_withdrawn_coins
         )
@@ -381,23 +457,63 @@ const determineTransactionType = (transaction) => {
 const getUserEarningsAdmin = async (req, res) => {
   try {
     const { userId } = req.params;
-    const { days = 30 } = req.query;
+    const {
+      days = 30,
+      page = 1,
+      limit = 10,
+      transaction_type = '',
+      status = '',
+      sort_order = 'desc'
+    } = req.query;
 
-    const { data: wallet, error: walletError } = await supabaseAdmin
+    const offset = (page - 1) * limit;
+
+    const { data: walletRow, error: walletError } = await supabaseAdmin
       .from('wallets')
       .select('*')
       .eq('user_id', userId)
-      .single();
+      .maybeSingle();
 
     if (walletError) throw walletError;
 
-    const { data: allTransactions, error: transError } = await supabaseAdmin
-      .from('transactions')
-      .select('*')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false });
+    const wallet = walletRow || {
+      coins_balance: 0,
+      games_balance: 0,
+      withdrawable_balance: 0,
+      referral_balance: 0,
+      investment_balance: 0,
+      total_withdrawn_games: 0,
+      total_withdrawn_withdrawable: 0,
+      total_withdrawn_referral: 0,
+      total_withdrawn_investment: 0,
+      total_withdrawn_coins: 0
+    };
 
-    if (transError) throw transError;
+    // Query lightweight columns for summary calculations (avoids downloading metadata/descriptions for all records)
+    const { data: summaryTxns, error: summaryError } = await supabaseAdmin
+      .from('transactions')
+      .select('amount, transaction_type, earning_type, created_at')
+      .eq('user_id', userId);
+
+    if (summaryError) throw summaryError;
+
+    // Query filtered, paginated transactions for UI display
+    let txnQuery = supabaseAdmin
+      .from('transactions')
+      .select('*', { count: 'exact' })
+      .eq('user_id', userId)
+      .order('created_at', { ascending: sort_order === 'asc' })
+      .range(offset, offset + parseInt(limit) - 1);
+
+    if (transaction_type) {
+      txnQuery = txnQuery.eq('transaction_type', transaction_type);
+    }
+    if (status) {
+      txnQuery = txnQuery.eq('status', status);
+    }
+
+    const { data: paginatedTxns, count: totalTxns, error: paginatedError } = await txnQuery;
+    if (paginatedError) throw paginatedError;
 
     let totalEarnings = 0;
     let totalDeductions = 0;
@@ -406,6 +522,7 @@ const getUserEarningsAdmin = async (req, res) => {
 
     const dateLimit = new Date();
     dateLimit.setDate(dateLimit.getDate() - parseInt(days));
+    const dateLimitTime = dateLimit.getTime();
 
     const earningsBreakdown = {
       referral_rewards: 0,
@@ -426,23 +543,15 @@ const getUserEarningsAdmin = async (req, res) => {
       other: 0
     };
 
-    const enhancedRecentTransactions = [];
-    const creditTransactions = [];
-    const debitTransactions = [];
-    const recentCreditTransactions = [];
-    const recentDebitTransactions = [];
-
-    allTransactions.forEach(t => {
-      const amount = parseFloat(t.amount);
+    summaryTxns.forEach(t => {
+      const amount = parseFloat(t.amount || 0);
       const isCredit = determineTransactionType(t);
-      const isRecent = new Date(t.created_at) >= dateLimit;
+      const isRecent = new Date(t.created_at).getTime() >= dateLimitTime;
 
       if (isCredit) {
         totalEarnings += amount;
-        creditTransactions.push(t);
         if (isRecent) {
           recentEarnings += amount;
-          recentCreditTransactions.push(t);
         }
 
         if (t.earning_type === 'referral_reward') earningsBreakdown.referral_rewards += amount;
@@ -455,10 +564,8 @@ const getUserEarningsAdmin = async (req, res) => {
 
       } else {
         totalDeductions += amount;
-        debitTransactions.push(t);
         if (isRecent) {
           recentDeductions += amount;
-          recentDebitTransactions.push(t);
         }
 
         if (t.transaction_type === 'withdrawal') deductionsBreakdown.withdrawals += amount;
@@ -468,19 +575,20 @@ const getUserEarningsAdmin = async (req, res) => {
         else if (t.transaction_type === 'purchase') deductionsBreakdown.purchases += amount;
         else deductionsBreakdown.other += amount;
       }
-
-      if (isRecent) {
-        enhancedRecentTransactions.push({
-          ...t,
-          type_category: isCredit ? 'credit' : 'debit'
-        });
-      }
     });
 
     const { count: directReferrals } = await supabaseAdmin
       .from('users')
       .select('id', { count: 'exact', head: true })
       .eq('referred_by', userId);
+
+    const enhancedTxns = (paginatedTxns || []).map(t => {
+      const isCredit = determineTransactionType(t);
+      return {
+        ...t,
+        type_category: isCredit ? 'credit' : 'debit'
+      };
+    });
 
     const responseData = {
       current_wallet: {
@@ -500,12 +608,12 @@ const getUserEarningsAdmin = async (req, res) => {
         all_time: {
           total_earnings: totalEarnings,
           breakdown: earningsBreakdown,
-          transaction_count: creditTransactions.length
+          transaction_count: summaryTxns.filter(t => determineTransactionType(t)).length
         },
         recent_period: {
           days: parseInt(days),
           total_earnings: recentEarnings,
-          transaction_count: recentCreditTransactions.length
+          transaction_count: summaryTxns.filter(t => determineTransactionType(t) && new Date(t.created_at).getTime() >= dateLimitTime).length
         }
       },
 
@@ -513,12 +621,12 @@ const getUserEarningsAdmin = async (req, res) => {
         all_time: {
           total_deductions: totalDeductions,
           breakdown: deductionsBreakdown,
-          transaction_count: debitTransactions.length
+          transaction_count: summaryTxns.filter(t => !determineTransactionType(t)).length
         },
         recent_period: {
           days: parseInt(days),
           total_deductions: recentDeductions,
-          transaction_count: recentDebitTransactions.length
+          transaction_count: summaryTxns.filter(t => !determineTransactionType(t) && new Date(t.created_at).getTime() >= dateLimitTime).length
         }
       },
 
@@ -534,17 +642,20 @@ const getUserEarningsAdmin = async (req, res) => {
         total_referrals: directReferrals || 0
       },
 
-      recent_transactions: enhancedRecentTransactions.slice(0, 100),
-      transactions: enhancedRecentTransactions,
+      recent_transactions: enhancedTxns,
+      transactions: enhancedTxns,
+
+      pagination: {
+        current_page: parseInt(page),
+        total_pages: Math.ceil(totalTxns / limit),
+        total_transactions: totalTxns,
+        limit: parseInt(limit)
+      },
 
       statistics: {
-        total_transactions: (allTransactions || []).length,
-        first_transaction_date: (allTransactions || []).length > 0 
-          ? allTransactions[allTransactions.length - 1].created_at 
-          : null,
-        last_transaction_date: (allTransactions || []).length > 0 
-          ? allTransactions[0].created_at 
-          : null
+        total_transactions: summaryTxns.length,
+        first_transaction_date: summaryTxns.length > 0 ? summaryTxns[summaryTxns.length - 1].created_at : null,
+        last_transaction_date: summaryTxns.length > 0 ? summaryTxns[0].created_at : null
       }
     };
 
@@ -567,28 +678,73 @@ const getUserEarningsAdmin = async (req, res) => {
 const updateUserStatus = async (req, res) => {
   try {
     const { userId } = req.params;
-    const { account_status, user_tier, role } = req.body;
+    const { account_status, user_tier, role, demo_balances } = req.body;
 
     const updateData = {};
     if (account_status) updateData.account_status = account_status;
     if (user_tier) updateData.user_tier = user_tier;
     if (role) updateData.role = role;
 
-    if (Object.keys(updateData).length === 0) {
+    if (Object.keys(updateData).length === 0 && !demo_balances) {
       return res.status(400).json({
         status: 'error',
-        message: 'No user fields provided for update'
+        message: 'No user fields or balances provided for update'
       });
     }
 
-    const { data: updatedUser, error } = await supabaseAdmin
-      .from('users')
-      .update(updateData)
-      .eq('id', userId)
-      .select('id, username, email, role, user_tier, account_status')
-      .single();
+    let updatedUser = null;
+    if (Object.keys(updateData).length > 0) {
+      const { data, error } = await supabaseAdmin
+        .from('users')
+        .update(updateData)
+        .eq('id', userId)
+        .select('id, username, email, role, user_tier, account_status')
+        .single();
 
-    if (error) throw error;
+      if (error) throw error;
+      updatedUser = data;
+    } else {
+      const { data, error } = await supabaseAdmin
+        .from('users')
+        .select('id, username, email, role, user_tier, account_status')
+        .eq('id', userId)
+        .single();
+      if (error) throw error;
+      updatedUser = data;
+    }
+
+    // Handle demo balance updates
+    if (demo_balances) {
+      if (updatedUser.role === 'demo') {
+        const { games_balance, coins_balance, withdrawable_balance, referral_balance } = demo_balances;
+        const walletUpdate = {};
+        if (games_balance !== undefined) walletUpdate.games_balance = parseFloat(games_balance);
+        if (coins_balance !== undefined) walletUpdate.coins_balance = parseFloat(coins_balance);
+        if (withdrawable_balance !== undefined) walletUpdate.withdrawable_balance = parseFloat(withdrawable_balance);
+        if (referral_balance !== undefined) walletUpdate.referral_balance = parseFloat(referral_balance);
+
+        if (Object.keys(walletUpdate).length > 0) {
+          const { data: existingWallet } = await supabaseAdmin
+            .from('wallets')
+            .select('id')
+            .eq('user_id', userId)
+            .maybeSingle();
+
+          if (existingWallet) {
+            const { error: walletError } = await supabaseAdmin
+              .from('wallets')
+              .update(walletUpdate)
+              .eq('user_id', userId);
+            if (walletError) throw walletError;
+          } else {
+            const { error: walletError } = await supabaseAdmin
+              .from('wallets')
+              .insert({ user_id: userId, ...walletUpdate });
+            if (walletError) throw walletError;
+          }
+        }
+      }
+    }
 
     await supabaseAdmin
       .from('admin_activities')
@@ -596,7 +752,7 @@ const updateUserStatus = async (req, res) => {
         admin_id: req.user.id,
         activity_type: 'user_updated',
         description: `Updated user: ${updatedUser.username}`,
-        metadata: { userId, changes: updateData }
+        metadata: { userId, changes: { ...updateData, demo_balances } }
       })
       .then(({ error: activityError }) => {
         if (activityError) {
@@ -668,6 +824,7 @@ const getPendingWithdrawals = async (req, res) => {
         .from('users')
         .select('id')
         .neq('role', DEMO_ROLE)
+        .neq('role', ADMIN_ROLE)
         .or(`username.ilike.%${search}%,full_name.ilike.%${search}%,email.ilike.%${search}%`);
       
       if (userError) throw userError;
@@ -714,6 +871,7 @@ const getPendingWithdrawals = async (req, res) => {
         .from('users')
         .select('id')
         .neq('role', DEMO_ROLE)
+        .neq('role', ADMIN_ROLE)
         .or(`username.ilike.%${search}%,full_name.ilike.%${search}%,email.ilike.%${search}%`);
       
       if (userError) throw userError;
@@ -1158,7 +1316,8 @@ const getKashcoinStatistics = async (req, res) => {
     const { data: allWallets, error: walletError } = await supabaseAdmin
       .from('wallets')
       .select('coins_balance, user_id, users!inner(role)')
-      .neq('users.role', DEMO_ROLE);
+      .neq('users.role', DEMO_ROLE)
+      .neq('users.role', ADMIN_ROLE);
 
     if (walletError) throw walletError;
 
@@ -1239,7 +1398,7 @@ const getKashcoinStatistics = async (req, res) => {
       }
 
       const { data } = await query;
-      const realData = (data || []).filter(tx => tx.users?.role !== DEMO_ROLE);
+      const realData = (data || []).filter(tx => !EXCLUDED_STATS_ROLES.includes(tx.users?.role));
       
       const userSums = {};
       realData.forEach(tx => {
@@ -1356,6 +1515,7 @@ const getKashcoinEligibleUsers = async (req, res) => {
         )
       `)
       .neq('users.role', DEMO_ROLE)
+      .neq('users.role', ADMIN_ROLE)
       .gte('coins_balance', threshold)
       .range(offset, offset + parseInt(limit) - 1)
       .order('coins_balance', { ascending: sort_order === 'asc' });
@@ -1368,6 +1528,7 @@ const getKashcoinEligibleUsers = async (req, res) => {
         .from('users')
         .select('id')
         .neq('role', DEMO_ROLE)
+        .neq('role', ADMIN_ROLE)
         .or(`full_name.ilike.%${search}%,email.ilike.%${search}%,username.ilike.%${search}%`);
       
       if (searchUsers && searchUsers.length > 0) {
@@ -1390,6 +1551,7 @@ const getKashcoinEligibleUsers = async (req, res) => {
       .from('wallets')
       .select('*, users!inner(role)', { count: 'exact', head: true })
       .neq('users.role', DEMO_ROLE)
+      .neq('users.role', ADMIN_ROLE)
       .gte('coins_balance', threshold);
 
     if (search) {
@@ -1397,6 +1559,7 @@ const getKashcoinEligibleUsers = async (req, res) => {
         .from('users')
         .select('id')
         .neq('role', DEMO_ROLE)
+        .neq('role', ADMIN_ROLE)
         .or(`full_name.ilike.%${search}%,email.ilike.%${search}%,username.ilike.%${search}%`);
       if (searchUsers) {
         countQuery = countQuery.in('user_id', searchUsers.map(u => u.id));
@@ -1625,7 +1788,7 @@ const getDashboardStats = async (req, res) => {
     const { data: users, error: userError } = await supabaseAdmin
       .from('users')
       .select('id, user_tier, role, account_status')
-      .neq('role', 'admin')
+      .neq('role', ADMIN_ROLE)
       .neq('role', DEMO_ROLE);
 
     if (userError) throw userError;
@@ -1656,7 +1819,7 @@ const getDashboardStats = async (req, res) => {
     // Fetch all relevant completed transactions
     const { data: completedTx } = await supabaseAdmin
       .from('transactions')
-      .select('user_id, transaction_type, earning_type, amount')
+      .select('user_id, transaction_type, earning_type, balance_type, amount')
       .eq('status', 'completed');
     const realCompletedTx = filterOutDemoRows(completedTx, demoUserIds);
     
@@ -1666,87 +1829,59 @@ const getDashboardStats = async (req, res) => {
     });
 
     const revenue_by_plan = {
-      Pro: { deposits: 0, payouts: 0, game_house_edge: 0, ad_revenue: 0, bonuses: 0, referrals: 0, net_revenue: 0 },
-      Amateur: { deposits: 0, payouts: 0, game_house_edge: 0, ad_revenue: 0, bonuses: 0, referrals: 0, net_revenue: 0 },
-      Free: { deposits: 0, payouts: 0, game_house_edge: 0, ad_revenue: 0, bonuses: 0, referrals: 0, net_revenue: 0 }
+      Pro: emptyRevenueBucket(),
+      Amateur: emptyRevenueBucket(),
+      Free: emptyRevenueBucket()
     };
-
-    let totalPlatformRevenue = 0;
 
     (realCompletedTx || []).forEach(tx => {
       const tier = userTierMap[tx.user_id] || 'Free';
-      const amt = parseFloat(tx.amount) || 0;
-      
       if (!revenue_by_plan[tier]) return;
-
-      if (tx.transaction_type === 'deposit' || tx.transaction_type === 'subscription') {
-        revenue_by_plan[tier].deposits += amt;
-        totalPlatformRevenue += amt;
-      } else if (tx.transaction_type === 'withdrawal') {
-        revenue_by_plan[tier].payouts += Math.abs(amt);
-        totalPlatformRevenue -= Math.abs(amt);
-      } else if (tx.transaction_type === 'gaming') {
-        if (amt < 0) {
-           revenue_by_plan[tier].game_house_edge += Math.abs(amt); // User loss = house profit
-           totalPlatformRevenue += Math.abs(amt);
-        } else if (amt > 0) {
-           revenue_by_plan[tier].game_house_edge -= amt; // User win = house loss
-           totalPlatformRevenue -= amt;
-        }
-      } else if (tx.transaction_type === 'ad_payment' || tx.transaction_type === 'sponsored_post_payment') {
-        revenue_by_plan[tier].ad_revenue += amt;
-        totalPlatformRevenue += amt;
-      } else if (tx.transaction_type === 'reward' || tx.transaction_type === 'bonus') {
-        revenue_by_plan[tier].bonuses += Math.abs(amt);
-        totalPlatformRevenue -= Math.abs(amt);
-      } else if (tx.transaction_type === 'referral_bonus' || tx.transaction_type === 'referral') {
-        revenue_by_plan[tier].referrals += Math.abs(amt);
-        totalPlatformRevenue -= Math.abs(amt);
-      }
+      applyRevenueTransaction(revenue_by_plan[tier], tx);
     });
 
-    // Calculate Nets using exact rules: Deposits + House Edge + Ad Revenue - Withdrawals - Bonuses - Referrals
+    // Calculate recognized platform net: upgrades + game edge + ad revenue - operating payouts.
     Object.keys(revenue_by_plan).forEach(tier => {
-       revenue_by_plan[tier].net_revenue = 
-          revenue_by_plan[tier].deposits + 
-          revenue_by_plan[tier].game_house_edge +
-          revenue_by_plan[tier].ad_revenue - 
-          revenue_by_plan[tier].payouts -
-          revenue_by_plan[tier].bonuses -
-          revenue_by_plan[tier].referrals;
+       finalizeRevenueBucket(revenue_by_plan[tier]);
     });
+    const totalPlatformRevenue = Object.values(revenue_by_plan)
+      .reduce((sum, bucket) => sum + bucket.net_revenue, 0);
 
     // 3. Wallet Analytics (Balance Breakdown)
     const { data: wallets, error: walletError } = await supabaseAdmin
       .from('wallets')
-      .select('games_balance, withdrawable_balance, referral_balance, coins_balance, investment_balance, users!inner(role)')
-      .neq('users.role', DEMO_ROLE);
+      .select('games_balance, withdrawable_balance, bonus_balance, referral_balance, coins_balance, investment_balance, users!inner(role)')
+      .neq('users.role', DEMO_ROLE)
+      .neq('users.role', ADMIN_ROLE);
 
     if (walletError) throw walletError;
 
     const totalGames = wallets?.reduce((sum, w) => sum + parseFloat(w.games_balance || 0), 0) || 0;
     const totalWithdrawable = wallets?.reduce((sum, w) => sum + parseFloat(w.withdrawable_balance || 0), 0) || 0;
+    const totalBonus = wallets?.reduce((sum, w) => sum + parseFloat(w.bonus_balance || 0), 0) || 0;
     const totalReferral = wallets?.reduce((sum, w) => sum + parseFloat(w.referral_balance || 0), 0) || 0;
     const totalCoins = wallets?.reduce((sum, w) => sum + parseFloat(w.coins_balance || 0), 0) || 0;
     const totalInvestment = wallets?.reduce((sum, w) => sum + parseFloat(w.investment_balance || 0), 0) || 0;
     
     // Combined balance excludes investment for the "Total Balance" if desired, or includes all
-    const combinedBalance = totalGames + totalWithdrawable + totalReferral + totalCoins;
+    const combinedBalance = totalGames + totalWithdrawable + totalBonus + totalReferral + totalCoins;
 
     // 4. Kash Ads Stats
     const { data: kashAdsData } = await supabaseAdmin
       .from('kash_ads')
-      .select('total_coins_earned, total_rewards_claimed');
+      .select('user_id, total_coins_earned, total_rewards_claimed');
 
-    const kashAdsTotalEarned = kashAdsData?.reduce((sum, r) => sum + parseFloat(r.total_coins_earned || 0), 0) || 0;
-    const kashAdsTotalClaims = kashAdsData?.reduce((sum, r) => sum + parseInt(r.total_rewards_claimed || 0), 0) || 0;
-    const kashAdsParticipatingUsers = kashAdsData?.length || 0;
+    const realKashAdsData = filterOutDemoRows(kashAdsData, demoUserIds);
+    const kashAdsTotalEarned = realKashAdsData?.reduce((sum, r) => sum + parseFloat(r.total_coins_earned || 0), 0) || 0;
+    const kashAdsTotalClaims = realKashAdsData?.reduce((sum, r) => sum + parseInt(r.total_rewards_claimed || 0), 0) || 0;
+    const kashAdsParticipatingUsers = realKashAdsData?.length || 0;
 
     // 5. Recent Users
     const { data: recentUsers } = await supabaseAdmin
       .from('users')
       .select('username, email, user_tier, created_at')
       .neq('role', DEMO_ROLE)
+      .neq('role', ADMIN_ROLE)
       .order('created_at', { ascending: false })
       .limit(10);
 
@@ -1771,6 +1906,7 @@ const getDashboardStats = async (req, res) => {
           combined_balance: combinedBalance,
           total_games_balance: totalGames,
           total_withdrawable_balance: totalWithdrawable,
+          total_bonus_balance: totalBonus,
           total_referral_balance: totalReferral,
           total_coins_balance: totalCoins,
           total_investment_balance: totalInvestment
@@ -1810,6 +1946,7 @@ const getTopEarners = async (req, res) => {
         )
       `)
       .neq('users.role', DEMO_ROLE)
+      .neq('users.role', ADMIN_ROLE)
       .order('referral_balance', { ascending: false })
       .limit(10);
 
@@ -1983,7 +2120,7 @@ const getGameAnalytics = async (req, res) => {
         .from('users')
         .select('id, created_at')
         .gte('created_at', monthlyStart.toISOString())
-        .neq('role', 'admin')
+        .neq('role', ADMIN_ROLE)
         .neq('role', DEMO_ROLE)
         .order('created_at', { ascending: true });
 
@@ -2030,6 +2167,7 @@ const getGameAnalytics = async (req, res) => {
           .from('wallets')
           .select('games_balance, withdrawable_balance, users!inner(username, user_tier, role)')
           .neq('users.role', DEMO_ROLE)
+          .neq('users.role', ADMIN_ROLE)
           .order('withdrawable_balance', { ascending: false })
           .limit(10);
         topEarners = (wallets || []).map((w, i) => ({
@@ -2316,6 +2454,7 @@ const getActivityAnalytics = async (req, res) => {
       .from('users')
       .select('id, created_at')
       .neq('role', DEMO_ROLE)
+      .neq('role', ADMIN_ROLE)
       .gte('created_at', timeLimit.toISOString());
 
     const activeFromActions = new Set(validActivities.map(a => a.user_id));
@@ -2360,7 +2499,8 @@ const getActivityAnalytics = async (req, res) => {
     const { data: wallets } = await supabaseAdmin
       .from('wallets')
       .select('games_balance, withdrawable_balance, coins_balance, referral_balance, users!inner(role)')
-      .neq('users.role', DEMO_ROLE);
+      .neq('users.role', DEMO_ROLE)
+      .neq('users.role', ADMIN_ROLE);
     const allBalances = (wallets || []).map(w => parseFloat(w.games_balance || 0) + parseFloat(w.withdrawable_balance || 0) + parseFloat(w.coins_balance || 0) + parseFloat(w.referral_balance || 0));
     const walletStats = {
       avg: allBalances.length > 0 ? (allBalances.reduce((a,b)=>a+b,0)/allBalances.length).toFixed(0) : 0,
@@ -2584,6 +2724,7 @@ const getUserGameActivities = async (req, res) => {
 
 const getMerchantAnalytics = async (req, res) => {
   try {
+    const demoUserIds = await getDemoUserIds();
     const { data: merchants, error: merchantErr } = await supabaseAdmin
       .from('users')
       .select('id, username, full_name, email, created_at, wallets(referral_balance, total_withdrawn_referral, vending_balance, total_loaded_vending, total_transferred_vending)')
@@ -2607,10 +2748,10 @@ const getMerchantAnalytics = async (req, res) => {
       .gte('created_at', thirtyDaysAgo);
 
     const merchantStats = merchants.map(m => {
-      const referralRows = (allReferrals || []).filter(r => r.referrer_id === m.id);
+      const referralRows = (allReferrals || []).filter(r => r.referrer_id === m.id && !demoUserIds.has(r.referred_id));
       const referredIds = referralRows.map(r => r.referred_id);
       const extraIds = (allUsers || [])
-        .filter(u => u.referred_by === m.id && !referredIds.includes(u.id))
+        .filter(u => u.referred_by === m.id && !demoUserIds.has(u.id) && !referredIds.includes(u.id))
         .map(u => u.id);
       const allReferredIds = [...new Set([...referredIds, ...extraIds])];
 
@@ -2683,8 +2824,10 @@ const getMerchantAnalytics = async (req, res) => {
 
 const getMerchantsList = async (req, res) => {
   try {
+    const demoUserIds = await getDemoUserIds();
     const { search, status, sort_by = 'referralCount', sort_order = 'desc', page = 1, limit = 20 } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
 
     // Get merchants with wallets
     let query = supabaseAdmin
@@ -2715,16 +2858,16 @@ const getMerchantsList = async (req, res) => {
 
     const { data: activities } = await supabaseAdmin
       .from('kash_user_activities')
-      .select('user_id');
+      .select('user_id, created_at');
 
     const list = merchants.map(m => {
       // Count from referrals table
-      const referralRows = (allReferrals || []).filter(r => r.referrer_id === m.id);
+      const referralRows = (allReferrals || []).filter(r => r.referrer_id === m.id && !demoUserIds.has(r.referred_id));
       const referredIds = referralRows.map(r => r.referred_id);
 
       // Also check users.referred_by in case referrals table is missing some
       const extraIds = (allUsers || [])
-        .filter(u => u.referred_by === m.id && !referredIds.includes(u.id))
+        .filter(u => u.referred_by === m.id && !demoUserIds.has(u.id) && !referredIds.includes(u.id))
         .map(u => u.id);
       const allReferredIds = [...new Set([...referredIds, ...extraIds])];
 
@@ -2781,6 +2924,7 @@ const getMerchantsList = async (req, res) => {
 
 const getMerchantCodeAnalytics = async (req, res) => {
   try {
+    const demoUserIds = await getDemoUserIds();
     const { data: codes, error } = await supabaseAdmin
       .from('deposit_codes')
       .select('id, merchant_id, status, amount, created_at');
@@ -2789,7 +2933,7 @@ const getMerchantCodeAnalytics = async (req, res) => {
 
     const { data: merchantsRaw } = await supabaseAdmin
       .from('users')
-      .select('id, username, wallets(referral_balance, total_withdrawn_referral)')
+      .select('id, username, wallets(referral_balance, total_withdrawn_referral, vending_balance)')
       .in('role', ['merchant', 'vendor', 'super_vendor']);
 
     const merchantMap = {};
@@ -2797,7 +2941,8 @@ const getMerchantCodeAnalytics = async (req, res) => {
       const walletData = Array.isArray(m.wallets) ? m.wallets[0] : m.wallets;
       merchantMap[m.id] = {
         username: m.username,
-        revenue: parseFloat(walletData?.referral_balance || 0) + parseFloat(walletData?.total_withdrawn_referral || 0)
+        revenue: parseFloat(walletData?.referral_balance || 0) + parseFloat(walletData?.total_withdrawn_referral || 0),
+        vending_balance: parseFloat(walletData?.vending_balance || 0)
       };
     });
 
@@ -2821,12 +2966,16 @@ const getMerchantCodeAnalytics = async (req, res) => {
           total_requested: 0,
           in_stock: 0,
           redeemed: 0,
-          total_value: 0
+          total_value: 0,
+          redeemed_value: 0
         };
       }
       statsByMerchant[mid].total_requested++;
       if (c.status === 'active') statsByMerchant[mid].in_stock++;
-      if (c.status === 'used') statsByMerchant[mid].redeemed++;
+      if (c.status === 'used') {
+        statsByMerchant[mid].redeemed++;
+        statsByMerchant[mid].redeemed_value += parseFloat(c.amount || 0);
+      }
       statsByMerchant[mid].total_value += parseFloat(c.amount || 0);
     });
 
@@ -2834,8 +2983,8 @@ const getMerchantCodeAnalytics = async (req, res) => {
     const enriched = Object.values(statsByMerchant).map(stat => {
       const mid = stat.merchant_id;
       const refIds = new Set([
-        ...(allReferrals || []).filter(r => r.referrer_id === mid).map(r => r.referred_id),
-        ...(allUsers || []).filter(u => u.referred_by === mid).map(u => u.id)
+        ...(allReferrals || []).filter(r => r.referrer_id === mid && !demoUserIds.has(r.referred_id)).map(r => r.referred_id),
+        ...(allUsers || []).filter(u => u.referred_by === mid && !demoUserIds.has(u.id)).map(u => u.id)
       ]);
       const activeCount = new Set(
         (recentActivity || []).filter(a => refIds.has(a.user_id)).map(a => a.user_id)
@@ -2846,6 +2995,7 @@ const getMerchantCodeAnalytics = async (req, res) => {
         ...stat,
         referral_count: refIds.size,
         merchant_revenue: merchantMap[mid]?.revenue || 0,
+        vending_balance: merchantMap[mid]?.vending_balance || 0,
         active_rate: activeRate
       };
     });
@@ -2853,9 +3003,10 @@ const getMerchantCodeAnalytics = async (req, res) => {
     const topRequested = [...enriched].sort((a, b) => b.total_requested - a.total_requested).slice(0, 5);
     const highestStock = [...enriched].sort((a, b) => b.in_stock - a.in_stock).slice(0, 5);
 
-    const totalCodes = codes?.length || 0;
-    const usedCodes = codes?.filter(c => c.status === 'used')?.length || 0;
-    const redemptionRate = totalCodes > 0 ? ((usedCodes / totalCodes) * 100).toFixed(1) : 0;
+    const validCodes = codes?.filter(c => c.merchant_id && merchantMap[c.merchant_id]) || [];
+    const totalCodes = validCodes.length;
+    const usedCodes = validCodes.filter(c => c.status === 'used').length;
+    const redemptionRate = totalCodes > 0 ? Number(((usedCodes / totalCodes) * 100).toFixed(1)) : 0;
 
     return res.status(200).json({
       status: 'success',
@@ -2863,7 +3014,9 @@ const getMerchantCodeAnalytics = async (req, res) => {
         redemption_rate: redemptionRate,
         top_requested: topRequested,
         highest_stock: highestStock,
-        total_value_generated: enriched.reduce((s, m) => s + m.total_value, 0)
+        total_value_generated: enriched.reduce((s, m) => s + m.redeemed_value, 0),
+        total_codes: totalCodes,
+        used_codes: usedCodes
       }
     });
   } catch (error) {
@@ -2876,13 +3029,14 @@ const getMerchantCodeAnalytics = async (req, res) => {
 
 const getMerchantDetail = async (req, res) => {
   try {
+    const demoUserIds = await getDemoUserIds();
     const { merchantId } = req.params;
     const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
 
     // 1. Merchant profile + wallet
     const { data: merchant, error: mErr } = await supabaseAdmin
       .from('users')
-      .select('id, username, full_name, email, account_status, role, created_at, referral_code, wallets(referral_balance, total_withdrawn_referral)')
+      .select('id, username, full_name, email, account_status, role, created_at, referral_code, wallets(referral_balance, total_withdrawn_referral, vending_balance, total_loaded_vending, total_transferred_vending)')
       .eq('id', merchantId)
       .single();
 
@@ -2902,9 +3056,11 @@ const getMerchantDetail = async (req, res) => {
       .select('id, username, full_name, user_tier, created_at, wallets(games_balance, withdrawable_balance, referral_balance)')
       .eq('referred_by', merchantId);
 
-    const referredIdsFromTable = (referralRows || []).map(r => r.referred_id);
+    const referredIdsFromTable = (referralRows || [])
+      .map(r => r.referred_id)
+      .filter(id => !demoUserIds.has(id));
     const extraIds = (extraUsers || [])
-      .filter(u => !referredIdsFromTable.includes(u.id))
+      .filter(u => !demoUserIds.has(u.id) && !referredIdsFromTable.includes(u.id))
       .map(u => u.id);
     const allReferredIds = [...new Set([...referredIdsFromTable, ...extraIds])];
 
@@ -2980,7 +3136,10 @@ const getMerchantDetail = async (req, res) => {
           account_status: merchant.account_status,
           role: merchant.role,
           referral_code: merchant.referral_code,
-          created_at: merchant.created_at
+          created_at: merchant.created_at,
+          vending_balance: parseFloat(walletData?.vending_balance || 0),
+          total_loaded_vending: parseFloat(walletData?.total_loaded_vending || 0),
+          total_transferred_vending: parseFloat(walletData?.total_transferred_vending || 0)
         },
         referral_summary: {
           total_referred: totalReferrals,
@@ -3090,6 +3249,136 @@ const loadVendingBalance = async (req, res) => {
   }
 };
 
+const getRevenueAnalytics = async (req, res) => {
+  try {
+    const demoUserIds = await getDemoUserIds();
+    const timeframe = req.query.timeframe || 'monthly';
+    const now = new Date();
+    const rangeStart = new Date(now);
+
+    if (timeframe === 'daily') {
+      rangeStart.setHours(0, 0, 0, 0);
+    } else if (timeframe === 'weekly') {
+      rangeStart.setDate(rangeStart.getDate() - 7);
+    } else if (timeframe === 'all-time') {
+      rangeStart.setTime(0);
+    } else {
+      rangeStart.setDate(rangeStart.getDate() - 30);
+    }
+
+    const { data: users, error: usersError } = await supabaseAdmin
+      .from('users')
+      .select('id, username, user_tier, role')
+      .not('role', 'in', `(${EXCLUDED_STATS_ROLES.join(',')})`);
+    if (usersError) throw usersError;
+
+    const userMap = {};
+    (users || []).forEach((user) => {
+      userMap[user.id] = user;
+    });
+
+    const { data: txns, error: txError } = await supabaseAdmin
+      .from('transactions')
+      .select('id, user_id, transaction_type, earning_type, balance_type, amount, status, description, created_at, metadata')
+      .eq('status', 'completed')
+      .gte('created_at', rangeStart.toISOString())
+      .order('created_at', { ascending: false })
+      .limit(10000);
+    if (txError) throw txError;
+
+    const realTxns = filterOutDemoRows(txns, demoUserIds);
+    const summary = finalizeRevenueBucket(realTxns.reduce((bucket, tx) => {
+      applyRevenueTransaction(bucket, tx);
+      return bucket;
+    }, emptyRevenueBucket()));
+
+    const grossCashInflow = summary.deposits + summary.upgrades + summary.ad_revenue + summary.investment_inflow;
+    const totalCosts = summary.payouts + summary.bonuses + summary.referrals;
+
+    const byTier = {
+      Pro: emptyRevenueBucket(),
+      Amateur: emptyRevenueBucket(),
+      Free: emptyRevenueBucket()
+    };
+
+    realTxns.forEach((tx) => {
+      const tier = userMap[tx.user_id]?.user_tier || 'Free';
+      if (!byTier[tier]) return;
+      applyRevenueTransaction(byTier[tier], tx);
+    });
+    Object.values(byTier).forEach(finalizeRevenueBucket);
+
+    const categoryCards = [
+      { key: 'upgrades', label: 'Upgrade Revenue', amount: summary.upgrades, direction: 'inflow' },
+      { key: 'game_house_edge', label: 'Game House Revenue', amount: summary.game_house_edge, direction: summary.game_house_edge >= 0 ? 'inflow' : 'outflow' },
+      { key: 'ad_revenue', label: 'Ads Revenue', amount: summary.ad_revenue, direction: 'inflow' },
+      { key: 'deposits', label: 'Gaming Deposits', amount: summary.deposits, direction: 'inflow' },
+      { key: 'investment_inflow', label: 'Investment Inflow', amount: summary.investment_inflow, direction: 'inflow' },
+      { key: 'payouts', label: 'Withdrawals Paid', amount: summary.payouts, direction: 'outflow' },
+      { key: 'bonuses', label: 'Bonuses & Rewards', amount: summary.bonuses, direction: 'outflow' },
+      { key: 'referrals', label: 'Referral Costs', amount: summary.referrals, direction: 'outflow' }
+    ];
+
+    const trendMap = {};
+    realTxns.forEach((tx) => {
+      const date = new Date(tx.created_at);
+      const label = timeframe === 'daily'
+        ? `${date.getHours()}:00`
+        : date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+      if (!trendMap[label]) {
+        trendMap[label] = { label, inflow: 0, recognized_revenue: 0, costs: 0, net: 0 };
+      }
+      const before = emptyRevenueBucket();
+      applyRevenueTransaction(before, tx);
+      finalizeRevenueBucket(before);
+      trendMap[label].inflow += before.deposits + before.upgrades + before.ad_revenue + before.investment_inflow;
+      trendMap[label].recognized_revenue += before.upgrades + before.game_house_edge + before.ad_revenue;
+      trendMap[label].costs += before.payouts + before.bonuses + before.referrals;
+      trendMap[label].net += before.net_revenue;
+    });
+
+    const recentRevenueEvents = realTxns
+      .filter((tx) => ['upgrade_payment', 'deposit', 'subscription', 'ad_payment', 'sponsored_post_payment', 'gaming', 'withdrawal', 'reward', 'bonus', 'referral_bonus', 'referral'].includes(tx.transaction_type))
+      .slice(0, 50)
+      .map((tx) => ({
+        id: tx.id,
+        user_id: tx.user_id,
+        username: userMap[tx.user_id]?.username || 'Unknown',
+        user_tier: userMap[tx.user_id]?.user_tier || 'Free',
+        transaction_type: tx.transaction_type,
+        earning_type: tx.earning_type,
+        balance_type: tx.balance_type,
+        amount: parseFloat(tx.amount || 0),
+        description: tx.description,
+        created_at: tx.created_at
+      }));
+
+    return res.status(200).json({
+      status: 'success',
+      data: {
+        timeframe,
+        kpi: {
+          recognized_revenue: summary.upgrades + summary.game_house_edge + summary.ad_revenue,
+          net_revenue: summary.net_revenue,
+          gross_cash_inflow: grossCashInflow,
+          total_costs: totalCosts,
+          upgrade_revenue: summary.upgrades,
+          game_house_revenue: summary.game_house_edge,
+          ad_revenue: summary.ad_revenue
+        },
+        summary,
+        categories: categoryCards,
+        by_tier: byTier,
+        trend: Object.values(trendMap),
+        recent_events: recentRevenueEvents
+      }
+    });
+  } catch (error) {
+    console.error('Revenue analytics error:', error);
+    return res.status(500).json({ status: 'error', message: 'Failed to fetch revenue analytics' });
+  }
+};
+
 
 module.exports = {
   getAllUsers,
@@ -3110,6 +3399,7 @@ module.exports = {
   updateSetting,
   
   getDashboardStats,
+  getRevenueAnalytics,
   getTopEarners,
   getGameAnalytics,
   getActivityAnalytics,

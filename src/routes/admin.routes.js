@@ -1,6 +1,6 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
-const { body, query } = require('express-validator');
+const { body, query, param } = require('express-validator');
 const router = express.Router();
 
 const adminController = require('../controllers/admin.controller');
@@ -74,7 +74,7 @@ router.get('/users', [
  * Get detailed user information
  */
 router.get('/users/:userId', [
-  query('userId').isUUID()
+  param('userId').isUUID()
 ], adminController.getUserDetails);
 
 /**
@@ -182,6 +182,14 @@ router.put('/settings', [
 router.get('/dashboard/stats', adminController.getDashboardStats);
 
 /**
+ * GET /api/admin/revenue-analytics
+ * Platform revenue analytics by source, tier, and timeframe
+ */
+router.get('/revenue-analytics', [
+  query('timeframe').optional().isIn(['daily', 'weekly', 'monthly', 'all-time'])
+], adminController.getRevenueAnalytics);
+
+/**
  * GET /api/admin/game-analytics
  * Comprehensive game analytics (revenue, heatmap, success rates, retention, alerts)
  */
@@ -200,7 +208,7 @@ router.get('/activities/analytics', adminController.getActivityAnalytics);
  * Get specific user's platform activities
  */
 router.get('/user/:userId/activities', [
-  query('userId').isUUID()
+  param('userId').isUUID()
 ], adminController.getUserActivities);
 
 /**
@@ -208,7 +216,7 @@ router.get('/user/:userId/activities', [
  * Get specific user's game playing activities
  */
 router.get('/user/:userId/game-activities', [
-  query('userId').isUUID()
+  param('userId').isUUID()
 ], adminController.getUserGameActivities);
 
 // ==================== MERCHANT MANAGEMENT ROUTES ====================

@@ -87,10 +87,10 @@ const createWithdrawalRequest = async (req, res) => {
       if (balance_type === 'coins_balance') {
         limitThreshold = limitsMap['coins_withdrawal_threshold_amount'] || 40000;
       } else if (balance_type === 'referral_balance') {
-        if (user.role !== 'merchant') {
+        if (user.role !== 'merchant' && user.user_tier !== 'Pro') {
           return res.status(403).json({
             status: 'error',
-            message: 'You must apply as a Merchant on your Referral page to withdraw referral earnings.'
+            message: 'You must apply as a Merchant on your Referral page or upgrade to Pro to withdraw referral earnings.'
           });
         }
         limitThreshold = limitsMap['min_withdrawal_referral_amount'] || 2000;

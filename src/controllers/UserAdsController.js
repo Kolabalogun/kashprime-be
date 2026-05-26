@@ -1,6 +1,24 @@
 const { supabaseAdmin } = require('../services/supabase.service');
 const { formatResponse } = require('../utils/responseFormatter');
 
+const DEMO_ROLE = 'demo';
+const ADMIN_ROLE = 'admin';
+const EXCLUDED_STATS_ROLES = [DEMO_ROLE, ADMIN_ROLE];
+
+const getDemoUserIds = async () => {
+  const { data, error } = await supabaseAdmin
+    .from('users')
+    .select('id')
+    .in('role', EXCLUDED_STATS_ROLES);
+
+  if (error) throw error;
+  return new Set((data || []).map((user) => user.id));
+};
+
+const filterOutDemoRows = (rows = [], demoUserIds = new Set(), key = 'user_id') => (
+  (rows || []).filter((row) => !demoUserIds.has(row?.[key]))
+);
+
 /**
  * Controller for User-Submitted Advertising System
  */
@@ -401,43 +419,51 @@ const UserAdsController = {
    */
   adminGetAnalytics: async (req, res) => {
     try {
-      // 1. Fetch Daily Trend Data (last 30 days)
-      const { data: performance, error: perfError } = await supabaseAdmin
-        .from('kash_ad_daily_stats')
-        .select('stat_date, impressions_count, clicks_count')
-        .order('stat_date', { ascending: true })
-        .limit(200);
+      const demoUserIds = await getDemoUserIds();
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
+      // 1. Fetch event trend data from user-level events so demo traffic is excluded.
+      const { data: performanceEvents, error: perfError } = await supabaseAdmin
+        .from('kash_ad_events')
+        .select('user_id, event_type, created_at')
+        .gte('created_at', thirtyDaysAgo.toISOString())
+        .order('created_at', { ascending: true })
+        .limit(5000);
 
       if (perfError) throw perfError;
+      const realPerformanceEvents = filterOutDemoRows(performanceEvents, demoUserIds);
 
       // 2. Financials: Separated Blocks
       
       // A. Internal Ad Revenue (from Advertisers) - Exclude refunds and non-processed
       const { data: revenueData, error: revError } = await supabaseAdmin
         .from('kash_ad_submissions')
-        .select('amount_paid, status')
+        .select('user_id, amount_paid, status')
         .not('status', 'in', '("pending", "rejected")');
 
       if (revError) throw revError;
-      const totalAdRevenue = revenueData.reduce((sum, ad) => sum + parseFloat(ad.amount_paid), 0);
+      const realRevenueData = filterOutDemoRows(revenueData, demoUserIds);
+      const totalAdRevenue = realRevenueData.reduce((sum, ad) => sum + parseFloat(ad.amount_paid || 0), 0);
 
       // B. Click to Earn Payables (Paid to Users)
       const { data: earnersData, error: earnError } = await supabaseAdmin
         .from('kash_ads')
-        .select('total_coins_earned, total_rewards_claimed');
+        .select('user_id, total_coins_earned, total_rewards_claimed');
         
       if (earnError) throw earnError;
-      const totalUserPayables = earnersData.reduce((sum, u) => sum + parseFloat(u.total_coins_earned || 0), 0);
+      const realEarnersData = filterOutDemoRows(earnersData, demoUserIds);
+      const totalUserPayables = realEarnersData.reduce((sum, u) => sum + parseFloat(u.total_coins_earned || 0), 0);
 
       // 3. User Engagement Metrics (Unique clickers)
       const getUniqueClickers = async (gteDate) => {
-        const { count, error } = await supabaseAdmin
+        const { data, error } = await supabaseAdmin
           .from('kash_ad_events')
-          .select('user_id', { count: 'exact', head: true })
+          .select('user_id')
           .eq('event_type', 'click')
           .not('user_id', 'is', null)
           .gte('created_at', gteDate.toISOString());
-        return count || 0;
+        if (error) throw error;
+        return new Set(filterOutDemoRows(data, demoUserIds).map((event) => event.user_id)).size;
       };
 
       const now = new Date();
@@ -449,16 +475,17 @@ const UserAdsController = {
         daily: await getUniqueClickers(startOfDay),
         weekly: await getUniqueClickers(startOfWeek),
         monthly: await getUniqueClickers(startOfMonth),
-        lifetime: earnersData.length // Users who have ever interacted
+        lifetime: realEarnersData.length // Users who have ever interacted
       };
 
       // 4. Leaderboards
       // Top Earners (Users who earn most from KashAds)
       const { data: topEarners } = await supabaseAdmin
         .from('kash_ads')
-        .select('total_coins_earned, total_rewards_claimed, users:user_id(username, full_name)')
+        .select('user_id, total_coins_earned, total_rewards_claimed, users:user_id(username, full_name)')
         .order('total_coins_earned', { ascending: false })
-        .limit(5);
+        .limit(50);
+      const realTopEarners = filterOutDemoRows(topEarners, demoUserIds).slice(0, 5);
 
       // Top Advertisers (Users who spend most on ads)
       const { data: advertisersRaw } = await supabaseAdmin
@@ -467,7 +494,7 @@ const UserAdsController = {
         .not('status', 'in', '("pending", "rejected")'); // Only account for actual revenue
       
       const advertiserMap = {};
-      advertisersRaw.forEach(ad => {
+      filterOutDemoRows(advertisersRaw, demoUserIds).forEach(ad => {
         const uid = ad.user_id;
         if (!advertiserMap[uid]) {
           advertiserMap[uid] = { 
@@ -485,13 +512,13 @@ const UserAdsController = {
         .slice(0, 5);
 
       // 5. Aggregate Daily Trend
-      const aggregated = performance.reduce((acc, curr) => {
-        const date = curr.stat_date;
+      const aggregated = realPerformanceEvents.reduce((acc, curr) => {
+        const date = new Date(curr.created_at).toISOString().slice(0, 10);
         if (!acc[date]) {
           acc[date] = { date, impressions: 0, clicks: 0 };
         }
-        acc[date].impressions += curr.impressions_count;
-        acc[date].clicks += curr.clicks_count;
+        if (curr.event_type === 'impression') acc[date].impressions += 1;
+        if (curr.event_type === 'click') acc[date].clicks += 1;
         return acc;
       }, {});
 
@@ -501,10 +528,10 @@ const UserAdsController = {
         dailyStats,
         campaignRevenue: totalAdRevenue,
         earningPayables: totalUserPayables,
-        activeCampaigns: revenueData.filter(ad => ad.status === 'active').length,
+        activeCampaigns: realRevenueData.filter(ad => ad.status === 'active').length,
         engagement,
         leaderboards: {
-          earners: topEarners,
+          earners: realTopEarners,
           advertisers: topAdvertisers
         }
       }));

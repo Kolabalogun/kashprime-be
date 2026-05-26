@@ -3,6 +3,24 @@ const { validationResult } = require("express-validator");
 const { logActivity } = require("../utils/activityLogger");
 const messages = require("../utils/constants/kashfeed");
 
+const DEMO_ROLE = 'demo';
+const ADMIN_ROLE = 'admin';
+const EXCLUDED_STATS_ROLES = [DEMO_ROLE, ADMIN_ROLE];
+
+const getDemoUserIds = async () => {
+  const { data, error } = await supabaseAdmin
+    .from('users')
+    .select('id')
+    .in('role', EXCLUDED_STATS_ROLES);
+
+  if (error) throw error;
+  return new Set((data || []).map((user) => user.id));
+};
+
+const filterOutDemoRows = (rows = [], demoUserIds = new Set(), key = 'user_id') => (
+  (rows || []).filter((row) => !demoUserIds.has(row?.[key]))
+);
+
 // Get daily status for sponsored posts
 const getDailyStatus = async (req, res) => {
   try {
@@ -189,6 +207,7 @@ const createPost = async (req, res) => {
 // Get all sponsored posts (Admin management)
 const getAllPosts = async (req, res) => {
   try {
+    const demoUserIds = await getDemoUserIds();
     const { page = 1, limit = 20, search } = req.query;
     const offset = (page - 1) * limit;
 
@@ -220,11 +239,44 @@ const getAllPosts = async (req, res) => {
       });
     }
 
+    const { data: allPosts } = await supabaseAdmin
+      .from("sponsored_posts")
+      .select("id, is_published, status");
+
+    const { data: allEngagements } = await supabaseAdmin
+      .from("sponsored_engagements")
+      .select("post_id, user_id, reward_amount");
+
+    const realEngagements = filterOutDemoRows(allEngagements, demoUserIds);
+    const engagementByPost = realEngagements.reduce((acc, engagement) => {
+      if (!acc[engagement.post_id]) {
+        acc[engagement.post_id] = { count: 0, rewards: 0 };
+      }
+      acc[engagement.post_id].count += 1;
+      acc[engagement.post_id].rewards += parseFloat(engagement.reward_amount || 0);
+      return acc;
+    }, {});
+
+    const postsWithoutDemoStats = (data || []).map((post) => {
+      const realStats = engagementByPost[post.id] || { count: 0 };
+      return {
+        ...post,
+        likes_count: realStats.count,
+        engagements_count: realStats.count
+      };
+    });
+
     res.json({
       status: "success",
       message: "Sponsored posts retrieved successfully",
       data: {
-        posts: data,
+        posts: postsWithoutDemoStats,
+        overview: {
+          total_posts: allPosts?.length || count || 0,
+          active_posts: (allPosts || []).filter((post) => post.is_published || post.status === 'published').length,
+          total_engagements: realEngagements.length,
+          total_rewards: realEngagements.reduce((sum, engagement) => sum + parseFloat(engagement.reward_amount || 0), 0)
+        },
         pagination: {
           page: parseInt(page),
           limit: parseInt(limit),

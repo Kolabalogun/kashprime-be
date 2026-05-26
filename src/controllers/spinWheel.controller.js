@@ -50,15 +50,35 @@ const playGame = async (req, res) => {
     const { data: settingsRows } = await supabaseAdmin
       .from('platform_settings')
       .select('setting_key, setting_value')
-      .in('setting_key', ['spin_wheel_enabled', 'spin_wheel_min_stake', 'spin_wheel_win_rate', 'spin_wheel_segments']);
+      .in('setting_key', [
+        'spin_wheel_enabled',
+        'spin_wheel_min_stake',
+        'spin_wheel_win_rate',
+        'spin_wheel_segments',
+        'spin_wheel_user_overrides'
+      ]);
 
     const map = {};
     settingsRows?.forEach(s => { map[s.setting_key] = s.setting_value; });
 
     const enabled  = parsePlatformSetting(map.spin_wheel_enabled,  true);
     const minStake = parseFloat(parsePlatformSetting(map.spin_wheel_min_stake, '50'));
-    const winRate  = parseInt(parsePlatformSetting(map.spin_wheel_win_rate, '45'));
+    let winRate  = parseInt(parsePlatformSetting(map.spin_wheel_win_rate, '45'));
     const segments = parsePlatformSetting(map.spin_wheel_segments, DEFAULT_SEGMENTS);
+
+    // Check for user-specific win rate override
+    const overridesStr = map.spin_wheel_user_overrides;
+    if (overridesStr) {
+      try {
+        const overrides = typeof overridesStr === 'string' ? JSON.parse(overridesStr) : overridesStr;
+        if (overrides && overrides[userId] !== undefined) {
+          winRate = parseInt(overrides[userId]);
+          console.log(`[SpinWheel] Applying win rate override of ${winRate}% for user ${userId}`);
+        }
+      } catch (e) {
+        console.error('Failed to parse spin_wheel_user_overrides:', e);
+      }
+    }
 
     if (!enabled) {
       return res.status(403).json({ status: 'error', message: 'Spin Wheel game is currently disabled' });

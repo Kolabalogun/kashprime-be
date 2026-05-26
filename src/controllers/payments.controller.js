@@ -603,6 +603,21 @@ class PaymentController {
       const amount = parseFloat(depositCode.amount);
       const reference = `LV_CODE_${code.substring(0, 6)}_${Date.now()}`;
 
+      if (purpose === 'upgrade') {
+        const { data: upgradeCostSetting } = await supabaseAdmin
+          .from('platform_settings')
+          .select('setting_value')
+          .eq('setting_key', 'tier_upgrade_cost')
+          .single();
+        const expectedUpgradeCost = upgradeCostSetting ? parseFloat(upgradeCostSetting.setting_value) : 2500;
+        if (amount < expectedUpgradeCost) {
+          return res.status(400).json({
+            success: false,
+            message: `This code is worth ₦${amount.toLocaleString()}. Pro upgrade requires at least ₦${expectedUpgradeCost.toLocaleString()}.`
+          });
+        }
+      }
+
       // 3. Mark code as used immediately to prevent double spending
       const { error: updateError } = await supabaseAdmin
         .from('deposit_codes')
@@ -631,7 +646,9 @@ class PaymentController {
 
       res.json({
         success: true,
-        message: `Code redeemed successfully! ₦${amount.toLocaleString()} added to your account.`,
+        message: purpose === 'upgrade'
+          ? 'Code redeemed successfully. Your account has been upgraded to Pro.'
+          : `Code redeemed successfully! ₦${amount.toLocaleString()} added to your account.`,
         data: {
           ...responseData,
           amount,
