@@ -54,6 +54,9 @@ const isGameWinType = (tx) => (
 const emptyRevenueBucket = () => ({
   deposits: 0,
   upgrades: 0,
+  upgrades_paystack: 0,
+  upgrades_flutterwave: 0,
+  upgrades_code: 0,
   game_stakes: 0,
   game_payouts: 0,
   game_house_edge: 0,
@@ -71,6 +74,18 @@ const applyRevenueTransaction = (bucket, tx) => {
 
   if (tx.transaction_type === 'upgrade_payment') {
     bucket.upgrades += amt;
+    const gateway = (tx.metadata?.gateway || '').toLowerCase();
+    const method = (tx.metadata?.method || '').toLowerCase();
+    const desc = (tx.description || '').toLowerCase();
+    if (gateway === 'paystack' || desc.includes('paystack')) {
+      bucket.upgrades_paystack += amt;
+    } else if (gateway === 'flutterwave' || desc.includes('flutterwave')) {
+      bucket.upgrades_flutterwave += amt;
+    } else if (gateway === 'code' || method === 'code_redemption' || desc.includes('code')) {
+      bucket.upgrades_code += amt;
+    } else {
+      bucket.upgrades_paystack += amt;
+    }
   } else if (tx.transaction_type === 'deposit') {
     if (tx.balance_type === 'investment_balance') {
       bucket.investment_inflow += amt;
@@ -81,6 +96,18 @@ const applyRevenueTransaction = (bucket, tx) => {
     }
   } else if (tx.transaction_type === 'subscription') {
     bucket.upgrades += amt;
+    const gateway = (tx.metadata?.gateway || '').toLowerCase();
+    const method = (tx.metadata?.method || '').toLowerCase();
+    const desc = (tx.description || '').toLowerCase();
+    if (gateway === 'paystack' || desc.includes('paystack')) {
+      bucket.upgrades_paystack += amt;
+    } else if (gateway === 'flutterwave' || desc.includes('flutterwave')) {
+      bucket.upgrades_flutterwave += amt;
+    } else if (gateway === 'code' || method === 'code_redemption' || desc.includes('code')) {
+      bucket.upgrades_code += amt;
+    } else {
+      bucket.upgrades_paystack += amt;
+    }
   } else if (tx.transaction_type === 'gaming') {
     if (isGameStakeType(tx)) {
       bucket.game_stakes += amt;
