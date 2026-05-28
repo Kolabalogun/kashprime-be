@@ -35,6 +35,10 @@ const kenoRoutes = require('./routes/keno.routes');
 
 const app = express();
 
+// Trust proxy settings for express-rate-limit behind reverse proxies (like Railway, Heroku, Cloudflare)
+app.set("trust proxy", 1);
+
+
 const allowedOrigins = [
   "http://localhost:3000",
   "http://localhost:5173",
