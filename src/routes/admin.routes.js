@@ -87,6 +87,16 @@ router.put('/users/:userId/status', [
   body('role').optional().isIn(['user', 'merchant', 'manager', 'admin', 'demo'])
 ], adminController.updateUserStatus);
 
+/**
+ * POST /api/admin/users/:userId/add-funds
+ * Add funds to user wallet (only games_balance and bonus_balance allowed)
+ */
+router.post('/users/:userId/add-funds', [
+  param('userId').isUUID(),
+  body('amount').isFloat({ min: 1 }),
+  body('balance_type').isIn(['games_balance', 'bonus_balance'])
+], adminController.adminAddUserFunds);
+
 // ==================== WITHDRAWAL MANAGEMENT ROUTES ====================
 
 /**

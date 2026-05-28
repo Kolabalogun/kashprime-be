@@ -3407,11 +3407,104 @@ const getRevenueAnalytics = async (req, res) => {
 };
 
 
+const adminAddUserFunds = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { amount, balance_type } = req.body;
+
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ status: 'error', message: 'Amount must be greater than 0' });
+    }
+
+    if (balance_type !== 'games_balance' && balance_type !== 'bonus_balance') {
+      return res.status(400).json({ status: 'error', message: 'Only games_balance and bonus_balance are allowed' });
+    }
+
+    const { data: user, error: userError } = await supabaseAdmin
+      .from('users')
+      .select('id, username')
+      .eq('id', userId)
+      .single();
+
+    if (userError || !user) {
+      return res.status(404).json({ status: 'error', message: 'User not found' });
+    }
+
+    const { data: wallet, error: walletError } = await supabaseAdmin
+      .from('wallets')
+      .select('id, games_balance, bonus_balance')
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    if (walletError) throw walletError;
+
+    if (!wallet) {
+      return res.status(404).json({ status: 'error', message: 'User wallet not found' });
+    }
+
+    const currentBalance = parseFloat(wallet[balance_type] || 0);
+    const newBalance = currentBalance + parseFloat(amount);
+
+    const { error: updateError } = await supabaseAdmin
+      .from('wallets')
+      .update({ [balance_type]: newBalance })
+      .eq('user_id', userId);
+
+    if (updateError) throw updateError;
+
+    // Log the transaction
+    const { error: txError } = await supabaseAdmin
+      .from('transactions')
+      .insert({
+        user_id: userId,
+        amount: parseFloat(amount),
+        transaction_type: 'bonus',
+        earning_type: 'admin_credit',
+        balance_type,
+        status: 'completed',
+        reference: `ADMIN-FUND-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        description: `Admin credited ${balance_type}`
+      });
+
+    if (txError) {
+      console.warn('Failed to log admin fund transaction:', txError.message);
+    }
+
+    // Log admin activity
+    const { error: activityError } = await supabaseAdmin
+      .from('admin_activities')
+      .insert({
+        admin_id: req.user.id,
+        activity_type: 'add_funds',
+        description: `Added ₦${amount} to ${user.username}'s ${balance_type}`,
+        metadata: { userId, amount, balance_type }
+      });
+      
+    if (activityError) {
+      console.warn('Admin activity log failed:', activityError.message);
+    }
+
+    res.status(200).json({
+      status: 'success',
+      message: `Successfully added ₦${amount} to ${balance_type}`,
+      data: {
+        new_balance: newBalance
+      }
+    });
+
+  } catch (error) {
+    console.error('Admin add user funds error:', error);
+    res.status(500).json({ status: 'error', message: 'Internal server error' });
+  }
+};
+
+
 module.exports = {
   getAllUsers,
   getUserDetails,
   updateUserStatus,
   getUserEarningsAdmin,
+  adminAddUserFunds,
   
   getPendingWithdrawals,
   processWithdrawal,

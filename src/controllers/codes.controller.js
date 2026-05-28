@@ -15,7 +15,7 @@ exports.generateCodes = async (req, res) => {
         const codeAmount = Number(amount);
         const totalValue = codeAmount * codeCount;
         
-        if (![3000, 5000, 10000, 20000, 50000].includes(codeAmount)) {
+        if (![2500, 3000, 5000, 10000, 20000, 50000].includes(codeAmount)) {
             return res.status(400).json({ success: false, error: 'Invalid denomination' });
         }
         
@@ -39,12 +39,6 @@ exports.generateCodes = async (req, res) => {
 
         const wallet = Array.isArray(merchant.wallets) ? merchant.wallets[0] : merchant.wallets;
         const currentVending = parseFloat(wallet?.vending_balance || 0);
-        if (currentVending < totalValue) {
-            return res.status(400).json({
-                success: false,
-                error: `Insufficient vending balance. Merchant has ₦${currentVending.toLocaleString()} available.`
-            });
-        }
 
         const codesToInsert = [];
         for (let i = 0; i < codeCount; i++) {
@@ -57,15 +51,7 @@ exports.generateCodes = async (req, res) => {
             });
         }
 
-        const { error: walletError } = await supabaseAdmin
-            .from('wallets')
-            .update({
-                vending_balance: currentVending - totalValue,
-                updated_at: new Date().toISOString()
-            })
-            .eq('user_id', merchant_id);
-
-        if (walletError) throw walletError;
+        // Vending balance is independent of code generation
 
         const { data, error } = await supabaseAdmin
             .from('deposit_codes')
@@ -73,13 +59,6 @@ exports.generateCodes = async (req, res) => {
             .select('*');
 
         if (error) {
-            await supabaseAdmin
-                .from('wallets')
-                .update({
-                    vending_balance: currentVending,
-                    updated_at: new Date().toISOString()
-                })
-                .eq('user_id', merchant_id);
             throw error;
         }
         
@@ -91,7 +70,7 @@ exports.generateCodes = async (req, res) => {
             metadata: { count: codeCount, amount: codeAmount, total_value: totalValue }
         });
 
-        res.status(201).json({ success: true, data, remaining_vending_balance: currentVending - totalValue });
+        res.status(201).json({ success: true, data, remaining_vending_balance: currentVending });
     } catch (error) {
         console.error('Generate codes error:', error);
         res.status(500).json({ success: false, error: error.message || 'Server error' });
@@ -162,26 +141,7 @@ exports.deleteCodes = async (req, res) => {
 
         if (deleteError) throw deleteError;
 
-        const refundByMerchant = {};
-        toDelete.forEach((code) => {
-            refundByMerchant[code.merchant_id] = (refundByMerchant[code.merchant_id] || 0) + parseFloat(code.amount || 0);
-        });
-
-        for (const [merchantId, refundAmount] of Object.entries(refundByMerchant)) {
-            const { data: wallet } = await supabaseAdmin
-                .from('wallets')
-                .select('vending_balance')
-                .eq('user_id', merchantId)
-                .single();
-
-            await supabaseAdmin
-                .from('wallets')
-                .update({
-                    vending_balance: parseFloat(wallet?.vending_balance || 0) + refundAmount,
-                    updated_at: new Date().toISOString()
-                })
-                .eq('user_id', merchantId);
-        }
+        // Codes and vending balance are independent, no refund needed.
 
         // Log activity
         await supabaseAdmin.from('admin_activities').insert({
