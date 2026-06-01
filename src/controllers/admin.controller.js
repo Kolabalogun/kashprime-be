@@ -3497,7 +3497,57 @@ const adminAddUserFunds = async (req, res) => {
     res.status(500).json({ status: 'error', message: 'Internal server error' });
   }
 };
+/**
+ * @desc    Get all deposit transactions globally
+ * @route   GET /api/admin/deposits
+ * @access  Admin
+ */
+const getAllDeposits = async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const search = req.query.search || '';
+    const status = req.query.status || '';
 
+    let query = supabaseAdmin
+      .from('transactions')
+      .select('*, user:users!transactions_user_id_fkey(username, full_name, email)', { count: 'exact' })
+      .eq('transaction_type', 'deposit')
+      .order('created_at', { ascending: false });
+
+    if (status) {
+      query = query.eq('status', status);
+    }
+
+    if (search) {
+      query = query.or(`reference.ilike.%${search}%,description.ilike.%${search}%`);
+    }
+
+    const from = (page - 1) * limit;
+    const to = from + limit - 1;
+
+    const { data, count, error } = await query.range(from, to);
+
+    if (error) throw error;
+
+    res.status(200).json({
+      status: 'success',
+      data: {
+        deposits: data || [],
+        pagination: {
+          total: count || 0,
+          page,
+          limit,
+          total_pages: Math.ceil((count || 0) / limit)
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('Get all deposits error:', error);
+    res.status(500).json({ status: 'error', message: 'Internal server error' });
+  }
+};
 
 module.exports = {
   getAllUsers,
@@ -3510,6 +3560,7 @@ module.exports = {
   processWithdrawal,
   bulkProcessWithdrawals,
   getWithdrawalStatistics,
+  getAllDeposits,
 
   getKashcoinEligibleUsers,
   processKashcoinPayments,

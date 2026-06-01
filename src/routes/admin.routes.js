@@ -137,6 +137,19 @@ router.put('/withdrawals/bulk-process', [
   body('decline_reason').optional().isLength({ max: 500 })
 ], adminController.bulkProcessWithdrawals);
 
+// ==================== DEPOSITS MANAGEMENT ROUTES ====================
+
+/**
+ * GET /api/admin/deposits
+ * Get all deposit transactions
+ */
+router.get('/deposits', [
+  query('page').optional().isInt({ min: 1 }),
+  query('limit').optional().isInt({ min: 1, max: 100 }),
+  query('search').optional().isLength({ max: 100 }),
+  query('status').optional().isIn(['completed', 'pending', 'failed'])
+], adminController.getAllDeposits);
+
 // ==================== KASHCOIN MANAGEMENT ROUTES ====================
 
 /**
