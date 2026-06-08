@@ -52,12 +52,14 @@ const allowedOrigins = [
 // Robust CORS implementation
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  // Clean origin by removing trailing slash for comparison
-  const cleanOrigin = origin ? origin.replace(/\/$/, "") : null;
 
-  if (cleanOrigin && allowedOrigins.includes(cleanOrigin)) {
+  // Always set CORS headers to prevent the browser from throwing a loud CORS error
+  // which exposes the endpoint in the console.
+  if (origin) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Access-Control-Allow-Credentials", "true");
+  } else {
+    res.setHeader("Access-Control-Allow-Origin", "*");
   }
 
   res.setHeader(
@@ -74,25 +76,22 @@ app.use((req, res, next) => {
     return res.status(200).end();
   }
 
+  // Perform custom origin check for the actual request
+  const cleanOrigin = origin ? origin.replace(/\/$/, "") : null;
+  
+  if (cleanOrigin && !allowedOrigins.includes(cleanOrigin)) {
+    // Return a custom, friendly error message instead of a CORS error
+    return res.status(403).json({
+      status: "error",
+      message: "Access forbidden. Please contact support if you believe this is an error."
+    });
+  }
+
   next();
 });
 
-// Also keep the cors package as a backup/standard for some library expectations
-app.use(
-  cors({
-    origin: allowedOrigins,
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allowedHeaders: [
-      "Content-Type",
-      "Authorization",
-      "X-Requested-With",
-      "Accept",
-      "Origin",
-    ],
-    optionsSuccessStatus: 200,
-  })
-);
+// We can remove the redundant cors() package call to avoid conflicts,
+// since our robust custom middleware handles everything now.
 
 
 // Security middleware
