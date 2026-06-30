@@ -79,7 +79,13 @@ const createWithdrawalRequest = async (req, res) => {
     }
 
     const isPro = userTier === 'Pro';
-    const currentBalance = parseFloat(wallet[balance_type] || 0);
+    let currentBalance = parseFloat(wallet[balance_type] || 0);
+
+    if (balance_type === 'referral_balance' && user?.role === 'manager') {
+      const { calculateManagerReferralBalance } = require('../utils/managerHelper');
+      const dynamicBalance = await calculateManagerReferralBalance(userId);
+      currentBalance = dynamicBalance.referral_balance;
+    }
 
     // Strict Tier Limit Rules
     if (['coins_balance', 'referral_balance'].includes(balance_type)) {

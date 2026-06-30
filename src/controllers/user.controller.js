@@ -333,10 +333,15 @@ const getTransactions = async (req, res) => {
   }
 };
 
-// Get wallet details with breakdown
 const getWalletDetails = async (req, res) => {
   try {
     const userId = req.user.id;
+
+    const { data: user } = await supabaseAdmin
+      .from('users')
+      .select('role')
+      .eq('id', userId)
+      .single();
 
     const { data: wallet, error } = await supabaseAdmin
       .from('wallets')
@@ -346,6 +351,12 @@ const getWalletDetails = async (req, res) => {
 
     if (error) {
       throw new Error('Failed to fetch wallet details');
+    }
+
+    if (user?.role === 'manager') {
+      const { calculateManagerReferralBalance } = require('../utils/managerHelper');
+      const dynamicBalance = await calculateManagerReferralBalance(userId);
+      wallet.referral_balance = dynamicBalance.referral_balance;
     }
 
     const { data: recentTransactions } = await supabaseAdmin

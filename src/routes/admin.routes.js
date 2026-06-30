@@ -283,4 +283,31 @@ router.post('/merchants/:merchantId/load-vending-balance', [
   body('amount').isFloat({ min: 1 })
 ], adminController.loadVendingBalance);
 
+// ==================== MANAGER MANAGEMENT ROUTES ====================
+
+/**
+ * GET /api/admin/managers/analytics
+ * Get top-level manager performance analytics
+ */
+router.get('/managers/analytics', adminController.getManagerAnalytics);
+
+/**
+ * GET /api/admin/managers/list
+ * Get detailed list of managers with metrics
+ */
+router.get('/managers/list', [
+  query('page').optional().isInt({ min: 1 }),
+  query('limit').optional().isInt({ min: 1, max: 100 }),
+  query('search').optional().isLength({ max: 100 }),
+  query('status').optional().isIn(['active', 'suspended', 'banned']),
+  query('sort_by').optional().isIn(['referralCount', 'revenue', 'engagement', 'created_at', 'username', 'amount_to_be_paid', 'amount_paid', 'total_downline_deposits', 'active_rate']),
+  query('sort_order').optional().isIn(['asc', 'desc'])
+], adminController.getManagersList);
+
+/**
+ * GET /api/admin/managers/:managerId
+ * Get detailed profile, referral tree, and earnings chart for a specific manager
+ */
+router.get('/managers/:managerId', adminController.getManagerDetail);
+
 module.exports = router;

@@ -3549,6 +3549,404 @@ const getAllDeposits = async (req, res) => {
   }
 };
 
+// ==================== MANAGER MANAGEMENT ====================
+
+const getManagerAnalytics = async (req, res) => {
+  try {
+    const demoUserIds = await getDemoUserIds();
+    
+    // Fetch all users with manager role
+    const { data: managers, error: managerErr } = await supabaseAdmin
+      .from('users')
+      .select('id, username, full_name, email, created_at, wallets(referral_balance, total_withdrawn_referral)')
+      .eq('role', 'manager');
+
+    if (managerErr) throw managerErr;
+
+    // Fetch all referrals
+    const { data: allReferrals, error: refErr } = await supabaseAdmin
+      .from('referrals')
+      .select('referrer_id, referred_id');
+
+    if (refErr) throw refErr;
+
+    // Fetch all users referred by cross-check
+    const { data: allUsers, error: userErr } = await supabaseAdmin
+      .from('users')
+      .select('id, referred_by')
+      .not('referred_by', 'is', null);
+
+    if (userErr) throw userErr;
+
+    // Fetch recent activity in the last 30 days
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const { data: recentActivity } = await supabaseAdmin
+      .from('kash_user_activities')
+      .select('user_id')
+      .gte('created_at', thirtyDaysAgo);
+
+    const managerStats = await Promise.all(managers.map(async (m) => {
+      // Find referred IDs
+      const referralRows = (allReferrals || []).filter(r => r.referrer_id === m.id && !demoUserIds.has(r.referred_id));
+      const referredIds = referralRows.map(r => r.referred_id);
+      const extraIds = (allUsers || [])
+        .filter(u => u.referred_by === m.id && !demoUserIds.has(u.id) && !referredIds.includes(u.id))
+        .map(u => u.id);
+      const allReferredIds = [...new Set([...referredIds, ...extraIds])];
+
+      const { calculateManagerReferralBalance } = require('../utils/managerHelper');
+      const dynamicBalance = await calculateManagerReferralBalance(m.id);
+
+      const amountToBePaid = dynamicBalance.referral_balance;
+      const amountPaid = dynamicBalance.total_withdrawn;
+      const revenue = dynamicBalance.total_earned;
+
+      // Active referred users (activity in 30 days)
+      const activeUsers = new Set(
+        (recentActivity || []).filter(a => allReferredIds.includes(a.user_id)).map(a => a.user_id)
+      ).size;
+      const active_rate = allReferredIds.length > 0
+        ? parseFloat(((activeUsers / allReferredIds.length) * 100).toFixed(1))
+        : 0;
+
+      return {
+        id: m.id,
+        username: m.username,
+        full_name: m.full_name,
+        referralCount: allReferredIds.length,
+        revenue,
+        amount_to_be_paid: amountToBePaid,
+        amount_paid: amountPaid,
+        active_users: activeUsers,
+        active_rate,
+        allReferredIds
+      };
+    }));
+
+    const totalManagers = managers.length;
+    const topReferrer = [...managerStats].sort((a, b) => b.referralCount - a.referralCount)[0] || null;
+    const topRevenue = [...managerStats].sort((a, b) => b.revenue - a.revenue)[0] || null;
+    const topEngagement = [...managerStats].sort((a, b) => b.active_rate - a.active_rate)[0] || null;
+
+    // Calculate total deposits of all referred users under managers
+    const allManagerReferredIds = [...new Set(managerStats.flatMap(m => m.allReferredIds))];
+    let totalDepositsVolume = 0;
+    if (allManagerReferredIds.length > 0) {
+      const { data: depositsData } = await supabaseAdmin
+        .from('transactions')
+        .select('amount')
+        .in('user_id', allManagerReferredIds)
+        .eq('transaction_type', 'deposit')
+        .eq('status', 'completed');
+      
+      totalDepositsVolume = (depositsData || []).reduce((sum, d) => sum + parseFloat(d.amount || 0), 0);
+    }
+
+    const globalTotalEarned = managerStats.reduce((sum, m) => sum + m.revenue, 0);
+    const globalTotalToBePaid = managerStats.reduce((sum, m) => sum + m.amount_to_be_paid, 0);
+    const globalTotalPaid = managerStats.reduce((sum, m) => sum + m.amount_paid, 0);
+
+    return res.status(200).json({
+      status: 'success',
+      data: {
+        total_managers: totalManagers,
+        top_referrer: topReferrer ? { id: topReferrer.id, username: topReferrer.username, referralCount: topReferrer.referralCount } : null,
+        top_revenue: topRevenue ? { id: topRevenue.id, username: topRevenue.username, revenue: topRevenue.revenue } : null,
+        top_engagement: topEngagement ? { id: topEngagement.id, username: topEngagement.username, active_rate: topEngagement.active_rate } : null,
+        global_total_earned: globalTotalEarned,
+        global_total_to_be_paid: globalTotalToBePaid,
+        global_total_paid: globalTotalPaid,
+        global_total_deposits_volume: totalDepositsVolume
+      }
+    });
+  } catch (error) {
+    console.error('Get manager analytics error:', error);
+    return res.status(500).json({ status: 'error', message: 'Failed to fetch manager analytics' });
+  }
+};
+
+const getManagersList = async (req, res) => {
+  try {
+    const demoUserIds = await getDemoUserIds();
+    const { search, status, sort_by = 'referralCount', sort_order = 'desc', page = 1, limit = 10 } = req.query;
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+    let query = supabaseAdmin
+      .from('users')
+      .select('id, username, full_name, email, account_status, created_at, wallets(referral_balance, total_withdrawn_referral)', { count: 'exact' })
+      .eq('role', 'manager');
+
+    if (search) {
+      query = query.or(`username.ilike.%${search}%,full_name.ilike.%${search}%,email.ilike.%${search}%`);
+    }
+    if (status) {
+      query = query.eq('account_status', status);
+    }
+
+    const { data: managers, count, error: mErr } = await query;
+    if (mErr) throw mErr;
+
+    const { data: allReferrals } = await supabaseAdmin
+      .from('referrals')
+      .select('referrer_id, referred_id');
+
+    const { data: allUsers } = await supabaseAdmin
+      .from('users')
+      .select('id, referred_by')
+      .not('referred_by', 'is', null);
+
+    const { data: activities } = await supabaseAdmin
+      .from('kash_user_activities')
+      .select('user_id, created_at');
+
+    // Gather referred user IDs to query deposit transactions in one go
+    const managersListWithReferred = managers.map(m => {
+      const referralRows = (allReferrals || []).filter(r => r.referrer_id === m.id && !demoUserIds.has(r.referred_id));
+      const referredIds = referralRows.map(r => r.referred_id);
+      const extraIds = (allUsers || [])
+        .filter(u => u.referred_by === m.id && !demoUserIds.has(u.id) && !referredIds.includes(u.id))
+        .map(u => u.id);
+      const allReferredIds = [...new Set([...referredIds, ...extraIds])];
+      return { m, allReferredIds };
+    });
+
+    const allReferredIdsFlat = [...new Set(managersListWithReferred.flatMap(x => x.allReferredIds))];
+
+    // Query deposits for all referred users
+    // Fetch manager commission percentage from settings
+    const { data: managerPercentSetting } = await supabaseAdmin
+      .from('platform_settings')
+      .select('setting_value')
+      .eq('setting_key', 'referral_manager_deposit_percent')
+      .single();
+    const percent = managerPercentSetting ? parseFloat(managerPercentSetting.setting_value) : 9;
+
+    let depositsByUserId = {};
+    if (allReferredIdsFlat.length > 0) {
+      const { data: depositsData } = await supabaseAdmin
+        .from('transactions')
+        .select('user_id, amount')
+        .in('user_id', allReferredIdsFlat)
+        .eq('transaction_type', 'deposit')
+        .eq('status', 'completed')
+        .eq('balance_type', 'games_balance');
+      
+      depositsData?.forEach(d => {
+        depositsByUserId[d.user_id] = (depositsByUserId[d.user_id] || 0) + parseFloat(d.amount || 0);
+      });
+    }
+
+    const list = managersListWithReferred.map(({ m, allReferredIds }) => {
+      const walletData = Array.isArray(m.wallets) ? m.wallets[0] : m.wallets;
+      const amount_paid = parseFloat(walletData?.total_withdrawn_referral || 0);
+      
+      // Sum of referred user deposits
+      const totalDownlineDeposits = allReferredIds.reduce((sum, rid) => sum + (depositsByUserId[rid] || 0), 0);
+      const revenue = totalDownlineDeposits * (percent / 100);
+      const amount_to_be_paid = Math.max(0, revenue - amount_paid);
+
+      const activityRows = (activities || []).filter(a => allReferredIds.includes(a.user_id));
+      const engagement = activityRows.length;
+      const activeUsers = new Set(
+        activityRows.filter(a => a.created_at >= thirtyDaysAgo).map(a => a.user_id)
+      ).size;
+      const activeRate = allReferredIds.length > 0
+        ? parseFloat(((activeUsers / allReferredIds.length) * 100).toFixed(1))
+        : 0;
+
+      const { wallets: _w, ...managerBase } = m;
+      return {
+        ...managerBase,
+        referralCount: allReferredIds.length,
+        revenue,
+        amount_to_be_paid,
+        amount_paid,
+        total_downline_deposits: totalDownlineDeposits,
+        engagement,
+        active_users: activeUsers,
+        active_rate: activeRate
+      };
+    });
+
+    const sorted = list.sort((a, b) => {
+      const valA = a[sort_by] ?? 0;
+      const valB = b[sort_by] ?? 0;
+      if (typeof valA === 'string') return sort_order === 'desc' ? valB.localeCompare(valA) : valA.localeCompare(valB);
+      return sort_order === 'desc' ? (valB - valA) : (valA - valB);
+    });
+
+    const paginated = sorted.slice(offset, offset + parseInt(limit));
+
+    return res.status(200).json({
+      status: 'success',
+      data: {
+        managers: paginated,
+        pagination: {
+          current_page: parseInt(page),
+          total_items: count || 0,
+          total_pages: Math.ceil((count || 0) / parseInt(limit))
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Get managers list error:', error);
+    return res.status(500).json({ status: 'error', message: 'Failed to fetch managers list' });
+  }
+};
+
+const getManagerDetail = async (req, res) => {
+  try {
+    const { managerId } = req.params;
+    const demoUserIds = await getDemoUserIds();
+
+    const { data: manager, error: mErr } = await supabaseAdmin
+      .from('users')
+      .select('id, username, full_name, email, account_status, created_at, wallets(referral_balance, total_withdrawn_referral)')
+      .eq('id', managerId)
+      .eq('role', 'manager')
+      .single();
+
+    if (mErr || !manager) {
+      return res.status(404).json({ status: 'error', message: 'Manager not found' });
+    }
+
+    // Get referred users
+    const { data: referralsRaw } = await supabaseAdmin
+      .from('users')
+      .select('id, username, full_name, user_tier, account_status, created_at')
+      .eq('referred_by', managerId);
+
+    const referredIds = (referralsRaw || []).map(u => u.id);
+
+    // Fetch manager commission percentage from settings
+    const { data: managerPercentSetting } = await supabaseAdmin
+      .from('platform_settings')
+      .select('setting_value')
+      .eq('setting_key', 'referral_manager_deposit_percent')
+      .single();
+    const percent = managerPercentSetting ? parseFloat(managerPercentSetting.setting_value) : 9;
+
+    let referredUsersList = [];
+    let totalDownlineDeposits = 0;
+    let referralsStats = {
+      total: referredIds.length,
+      pro: 0,
+      free: 0,
+      active: 0
+    };
+
+    if (referredIds.length > 0) {
+      // Get all completed direct game deposits of these referred users
+      const { data: depositsData } = await supabaseAdmin
+        .from('transactions')
+        .select('user_id, amount')
+        .in('user_id', referredIds)
+        .eq('transaction_type', 'deposit')
+        .eq('status', 'completed')
+        .eq('balance_type', 'games_balance');
+
+      // Map deposits
+      const depositsByUserId = {};
+      depositsData?.forEach(d => {
+        depositsByUserId[d.user_id] = (depositsByUserId[d.user_id] || 0) + parseFloat(d.amount || 0);
+        totalDownlineDeposits += parseFloat(d.amount || 0);
+      });
+
+      referredUsersList = referralsRaw.map(u => {
+        const totalDeposits = depositsByUserId[u.id] || 0;
+        const totalCommissionEarned = totalDeposits * (percent / 100);
+
+        if (u.user_tier === 'Pro') referralsStats.pro++;
+        else referralsStats.free++;
+
+        if (u.account_status === 'active') referralsStats.active++;
+
+        return {
+          id: u.id,
+          username: u.username,
+          full_name: u.full_name,
+          user_tier: u.user_tier,
+          account_status: u.account_status,
+          created_at: u.created_at,
+          total_deposits: totalDeposits,
+          commission_earned: totalCommissionEarned
+        };
+      });
+    }
+
+    const walletData = Array.isArray(manager.wallets) ? manager.wallets[0] : manager.wallets;
+    const amount_paid = parseFloat(walletData?.total_withdrawn_referral || 0);
+    const total_earned = totalDownlineDeposits * (percent / 100);
+    const amount_to_be_paid = Math.max(0, total_earned - amount_paid);
+
+    // Get earnings chart data: Group downline deposits in the last 6 months
+    const sixMonthsAgo = new Date();
+    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 5);
+    sixMonthsAgo.setDate(1);
+    sixMonthsAgo.setHours(0, 0, 0, 0);
+
+    let chartDataRaw = [];
+    if (referredIds.length > 0) {
+      const { data } = await supabaseAdmin
+        .from('transactions')
+        .select('amount, created_at')
+        .in('user_id', referredIds)
+        .eq('transaction_type', 'deposit')
+        .eq('status', 'completed')
+        .eq('balance_type', 'games_balance')
+        .gte('created_at', sixMonthsAgo.toISOString())
+        .order('created_at', { ascending: true });
+      chartDataRaw = data || [];
+    }
+
+    // Group by month-year
+    const monthlyEarnings = {};
+    for (let i = 0; i < 6; i++) {
+      const d = new Date();
+      d.setMonth(d.getMonth() - i);
+      const label = d.toLocaleString('default', { month: 'short', year: 'numeric' });
+      monthlyEarnings[label] = 0;
+    }
+
+    chartDataRaw?.forEach(t => {
+      const date = new Date(t.created_at);
+      const label = date.toLocaleString('default', { month: 'short', year: 'numeric' });
+      if (monthlyEarnings[label] !== undefined) {
+        monthlyEarnings[label] += parseFloat(t.amount || 0) * (percent / 100);
+      }
+    });
+
+    const chart_data = Object.entries(monthlyEarnings)
+      .map(([month, amount]) => ({ month, amount }))
+      .reverse();
+
+    return res.status(200).json({
+      status: 'success',
+      data: {
+        manager: {
+          id: manager.id,
+          username: manager.username,
+          full_name: manager.full_name,
+          email: manager.email,
+          account_status: manager.account_status,
+          created_at: manager.created_at,
+          amount_to_be_paid,
+          amount_paid,
+          total_earned,
+          total_downline_deposits: totalDownlineDeposits
+        },
+        referrals_stats: referralsStats,
+        referred_users: referredUsersList,
+        chart_data
+      }
+    });
+  } catch (error) {
+    console.error('Get manager detail error:', error);
+    return res.status(500).json({ status: 'error', message: 'Failed to fetch manager details' });
+  }
+};
+
 module.exports = {
   getAllUsers,
   getUserDetails,
@@ -3582,5 +3980,10 @@ module.exports = {
   getMerchantsList,
   getMerchantCodeAnalytics,
   getMerchantDetail,
-  loadVendingBalance
+  loadVendingBalance,
+
+  // Manager Management
+  getManagerAnalytics,
+  getManagersList,
+  getManagerDetail
 };

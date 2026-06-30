@@ -745,7 +745,7 @@ class PaymentController {
     }
 
     // Fire-and-forget referral commission
-    PaymentController.processReferralCommission(userId, paidAmount, reference);
+    PaymentController.processReferralCommission(userId, paidAmount, reference, targetBalanceType);
 
     // Log Activity
     await logActivity(userId, 'deposit_complete', {
@@ -876,7 +876,7 @@ class PaymentController {
       });
 
     // Fire-and-forget referral commission
-    PaymentController.processReferralCommission(userId, capitalAmount, reference);
+    PaymentController.processReferralCommission(userId, capitalAmount, reference, 'investment_balance');
 
     // Log Activity
     await logActivity(userId, 'investment_start', {
@@ -1294,7 +1294,7 @@ class PaymentController {
   }
 
   // Handle dynamic referral commission for deposits
-  static async processReferralCommission(userId, depositAmount, transactionReference) {
+  static async processReferralCommission(userId, depositAmount, transactionReference, balanceType = 'games_balance') {
     try {
       const { data: user } = await supabaseAdmin
         .from('users')
@@ -1304,37 +1304,57 @@ class PaymentController {
 
       if (!user || !user.referred_by) return;
 
-      // Count user's successful deposits to determine if it's the first one
-      const { count, error: countError } = await supabaseAdmin
-        .from('transactions')
-        .select('id', { count: 'exact', head: true })
-        .eq('user_id', userId)
-        .eq('transaction_type', 'deposit')
-        .eq('status', 'completed');
+      // Fetch the referrer's role
+      const { data: referrer, error: referrerErr } = await supabaseAdmin
+        .from('users')
+        .select('id, username, role')
+        .eq('id', user.referred_by)
+        .single();
 
-      if (countError) {
-        console.error('Error counting deposits', countError);
+      if (referrerErr || !referrer) {
+        console.error('Error fetching referrer details', referrerErr);
         return;
       }
 
-      // Since the current deposit is already inserted, if count <= 1 it's the first deposit.
-      const isFirstDeposit = count <= 1;
+      let percent = 0;
+      let isFirstDeposit = false;
+      const isManager = referrer.role === 'manager';
 
-      // Fetch percentages from settings
-      const { data: settings } = await supabaseAdmin
-        .from('platform_settings')
-        .select('setting_key, setting_value')
-        .in('setting_key', ['referral_first_deposit_percent', 'referral_subsequent_deposit_percent']);
+      if (isManager) {
+        return; // Managers' commission is calculated dynamically on-the-fly, not per-deposit.
+      }
+        // Count user's successful deposits to determine if it's the first one
+        const { count, error: countError } = await supabaseAdmin
+          .from('transactions')
+          .select('id', { count: 'exact', head: true })
+          .eq('user_id', userId)
+          .eq('transaction_type', 'deposit')
+          .eq('status', 'completed');
 
-      let firstDepositPercent = 35;
-      let subsequentDepositPercent = 15;
+        if (countError) {
+          console.error('Error counting deposits', countError);
+          return;
+        }
 
-      settings?.forEach(s => {
-        if (s.setting_key === 'referral_first_deposit_percent') firstDepositPercent = parseFloat(s.setting_value);
-        if (s.setting_key === 'referral_subsequent_deposit_percent') subsequentDepositPercent = parseFloat(s.setting_value);
-      });
+        // Since the current deposit is already inserted, if count <= 1 it's the first deposit.
+        isFirstDeposit = count <= 1;
 
-      const percent = isFirstDeposit ? firstDepositPercent : subsequentDepositPercent;
+        // Fetch percentages from settings
+        const { data: settings } = await supabaseAdmin
+          .from('platform_settings')
+          .select('setting_key, setting_value')
+          .in('setting_key', ['referral_first_deposit_percent', 'referral_subsequent_deposit_percent']);
+
+        let firstDepositPercent = 35;
+        let subsequentDepositPercent = 15;
+
+        settings?.forEach(s => {
+          if (s.setting_key === 'referral_first_deposit_percent') firstDepositPercent = parseFloat(s.setting_value);
+          if (s.setting_key === 'referral_subsequent_deposit_percent') subsequentDepositPercent = parseFloat(s.setting_value);
+        });
+
+        percent = isFirstDeposit ? firstDepositPercent : subsequentDepositPercent;
+
       const commissionAmount = depositAmount * (percent / 100);
 
       if (commissionAmount <= 0) return;
@@ -1396,12 +1416,15 @@ class PaymentController {
           currency: 'NGN',
           status: 'completed',
           reference: `REF_COMMISSION_${Date.now()}_${Math.random().toString(36).substring(7)}`,
-          description: `Referral commission - ${percent}% from ${user.username}'s deposit`,
+          description: isManager
+            ? `Manager referral commission - ${percent}% from ${user.username}'s game deposit`
+            : `Referral commission - ${percent}% from ${user.username}'s deposit`,
           metadata: {
             referred_user_id: userId,
             deposit_reference: transactionReference,
             commission_percent: percent,
-            is_first_deposit: isFirstDeposit
+            is_first_deposit: isFirstDeposit,
+            is_manager_commission: isManager
           },
           created_at: new Date().toISOString()
         });
