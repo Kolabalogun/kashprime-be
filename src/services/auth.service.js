@@ -481,6 +481,131 @@ const updatePassword = async (userId, currentPassword, newPassword) => {
 // Get user referrals
 const getUserReferrals = async (userId) => {
   try {
+    // Check user role first
+    const { data: user } = await supabaseAdmin
+      .from('users')
+      .select('role')
+      .eq('id', userId)
+      .single();
+
+    if (user?.role === 'manager') {
+      // Get manager setting percent
+      const { data: managerPercentSetting } = await supabaseAdmin
+        .from('platform_settings')
+        .select('setting_value')
+        .eq('setting_key', 'referral_manager_deposit_percent')
+        .single();
+      const percent = managerPercentSetting ? parseFloat(managerPercentSetting.setting_value) : 9;
+
+      // Get referred users (downlines)
+      const { data: referredUsers } = await supabaseAdmin
+        .from('users')
+        .select('id, username, full_name, user_tier, account_status, created_at')
+        .eq('referred_by', userId)
+        .order('created_at', { ascending: false });
+
+      const referredIds = referredUsers?.map(u => u.id) || [];
+      let userDeposits = {};
+      let totalDeposits = 0;
+
+      if (referredIds.length > 0) {
+        // Only game deposits count for manager: balance_type = 'games_balance'
+        const { data: depositsData } = await supabaseAdmin
+          .from('transactions')
+          .select('user_id, amount')
+          .in('user_id', referredIds)
+          .eq('transaction_type', 'deposit')
+          .eq('status', 'completed')
+          .eq('balance_type', 'games_balance');
+
+        depositsData?.forEach(d => {
+          userDeposits[d.user_id] = (userDeposits[d.user_id] || 0) + parseFloat(d.amount || 0);
+          totalDeposits += parseFloat(d.amount || 0);
+        });
+      }
+
+      // Fetch wallet to get current total_withdrawn_referral
+      const { data: wallet } = await supabaseAdmin
+        .from('wallets')
+        .select('total_withdrawn_referral')
+        .eq('user_id', userId)
+        .single();
+
+      const totalWithdrawn = parseFloat(wallet?.total_withdrawn_referral || 0);
+      const totalEarned = totalDeposits * (percent / 100);
+      const referralBalance = Math.max(0, totalEarned - totalWithdrawn);
+
+      // Get 6-month deposits trend to group by month
+      const sixMonthsAgo = new Date();
+      sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 5);
+      sixMonthsAgo.setDate(1);
+      sixMonthsAgo.setHours(0, 0, 0, 0);
+
+      let chartDataRaw = [];
+      if (referredIds.length > 0) {
+        const { data } = await supabaseAdmin
+          .from('transactions')
+          .select('amount, created_at')
+          .in('user_id', referredIds)
+          .eq('transaction_type', 'deposit')
+          .eq('status', 'completed')
+          .eq('balance_type', 'games_balance')
+          .gte('created_at', sixMonthsAgo.toISOString())
+          .order('created_at', { ascending: true });
+        chartDataRaw = data || [];
+      }
+
+      // Group by month-year
+      const monthlyEarnings = {};
+      for (let i = 0; i < 6; i++) {
+        const d = new Date();
+        d.setMonth(d.getMonth() - i);
+        const label = d.toLocaleString('default', { month: 'short', year: 'numeric' });
+        monthlyEarnings[label] = 0;
+      }
+
+      chartDataRaw?.forEach(t => {
+        const date = new Date(t.created_at);
+        const label = date.toLocaleString('default', { month: 'short', year: 'numeric' });
+        if (monthlyEarnings[label] !== undefined) {
+          monthlyEarnings[label] += parseFloat(t.amount || 0) * (percent / 100);
+        }
+      });
+
+      const chartData = Object.entries(monthlyEarnings)
+        .map(([month, amount]) => ({ month, amount }))
+        .reverse();
+
+      // Gather active referrals statistics
+      const referralsStats = {
+        total: referredIds.length,
+        pro: referredUsers?.filter(u => u.user_tier === 'Pro').length || 0,
+        free: referredUsers?.filter(u => u.user_tier !== 'Pro').length || 0,
+        active: referredUsers?.filter(u => u.account_status === 'active').length || 0
+      };
+
+      return {
+        is_manager: true,
+        total_referrals: referredUsers?.length || 0,
+        total_earnings: totalEarned,
+        referral_balance: referralBalance,
+        total_withdrawn: totalWithdrawn,
+        total_downline_deposits: totalDeposits,
+        referrals_stats: referralsStats,
+        direct_referrals: referredUsers?.map(u => ({
+          id: u.id,
+          username: u.username,
+          full_name: u.full_name,
+          user_tier: u.user_tier,
+          status: u.account_status,
+          reward_amount: (userDeposits[u.id] || 0) * (percent / 100),
+          created_at: u.created_at,
+          total_deposits: userDeposits[u.id] || 0
+        })) || [],
+        chart_data: chartData
+      };
+    }
+
     // Get direct referrals from users table directly for truthiness
     const { data: referredUsers } = await supabaseAdmin
       .from('users')
