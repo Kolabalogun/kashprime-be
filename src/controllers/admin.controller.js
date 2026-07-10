@@ -3668,7 +3668,7 @@ const getManagerAnalytics = async (req, res) => {
 const getManagersList = async (req, res) => {
   try {
     const demoUserIds = await getDemoUserIds();
-    const { search, status, sort_by = 'referralCount', sort_order = 'desc', page = 1, limit = 10 } = req.query;
+    const { search, status, sort_by = 'tier1Count', sort_order = 'desc', page = 1, limit = 10 } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
 
@@ -3687,33 +3687,33 @@ const getManagersList = async (req, res) => {
     const { data: managers, count, error: mErr } = await query;
     if (mErr) throw mErr;
 
-    const { data: allReferrals } = await supabaseAdmin
-      .from('referrals')
-      .select('referrer_id, referred_id');
-
+    // Fetch all users to map hierarchy
     const { data: allUsers } = await supabaseAdmin
       .from('users')
-      .select('id, referred_by')
-      .not('referred_by', 'is', null);
+      .select('id, username, full_name, referred_by, account_status, created_at');
 
     const { data: activities } = await supabaseAdmin
       .from('kash_user_activities')
       .select('user_id, created_at');
 
-    // Gather referred user IDs to query deposit transactions in one go
-    const managersListWithReferred = managers.map(m => {
-      const referralRows = (allReferrals || []).filter(r => r.referrer_id === m.id && !demoUserIds.has(r.referred_id));
-      const referredIds = referralRows.map(r => r.referred_id);
-      const extraIds = (allUsers || [])
-        .filter(u => u.referred_by === m.id && !demoUserIds.has(u.id) && !referredIds.includes(u.id))
-        .map(u => u.id);
-      const allReferredIds = [...new Set([...referredIds, ...extraIds])];
-      return { m, allReferredIds };
+    // Build the referral mapping for each manager
+    const managersListWithReferred = (managers || []).map(m => {
+      const tier1 = (allUsers || []).filter(u => u.referred_by === m.id && !demoUserIds.has(u.id));
+      const tier1Ids = tier1.map(u => u.id);
+      
+      const tier2 = (allUsers || []).filter(u => tier1Ids.includes(u.referred_by) && !demoUserIds.has(u.id));
+      const tier2Ids = tier2.map(u => u.id);
+
+      return { 
+        m, 
+        tier1Count: tier1.length, 
+        tier2Count: tier2.length, 
+        tier2Ids 
+      };
     });
 
-    const allReferredIdsFlat = [...new Set(managersListWithReferred.flatMap(x => x.allReferredIds))];
+    const allTier2IdsFlat = [...new Set(managersListWithReferred.flatMap(x => x.tier2Ids))];
 
-    // Query deposits for all referred users
     // Fetch manager commission percentage from settings
     const { data: managerPercentSetting } = await supabaseAdmin
       .from('platform_settings')
@@ -3723,11 +3723,11 @@ const getManagersList = async (req, res) => {
     const percent = managerPercentSetting ? parseFloat(managerPercentSetting.setting_value) : 9;
 
     let depositsByUserId = {};
-    if (allReferredIdsFlat.length > 0) {
+    if (allTier2IdsFlat.length > 0) {
       const { data: depositsData } = await supabaseAdmin
         .from('transactions')
         .select('user_id, amount')
-        .in('user_id', allReferredIdsFlat)
+        .in('user_id', allTier2IdsFlat)
         .eq('transaction_type', 'deposit')
         .eq('status', 'completed')
         .eq('balance_type', 'games_balance');
@@ -3737,28 +3737,31 @@ const getManagersList = async (req, res) => {
       });
     }
 
-    const list = managersListWithReferred.map(({ m, allReferredIds }) => {
+    const list = managersListWithReferred.map(({ m, tier1Count, tier2Count, tier2Ids }) => {
       const walletData = Array.isArray(m.wallets) ? m.wallets[0] : m.wallets;
       const amount_paid = parseFloat(walletData?.total_withdrawn_referral || 0);
       
-      // Sum of referred user deposits
-      const totalDownlineDeposits = allReferredIds.reduce((sum, rid) => sum + (depositsByUserId[rid] || 0), 0);
+      // Sum of Tier 2 deposits
+      const totalDownlineDeposits = tier2Ids.reduce((sum, rid) => sum + (depositsByUserId[rid] || 0), 0);
       const revenue = totalDownlineDeposits * (percent / 100);
       const amount_to_be_paid = Math.max(0, revenue - amount_paid);
 
-      const activityRows = (activities || []).filter(a => allReferredIds.includes(a.user_id));
+      // Active status evaluation based on Tier 2 network activity
+      const activityRows = (activities || []).filter(a => tier2Ids.includes(a.user_id));
       const engagement = activityRows.length;
       const activeUsers = new Set(
         activityRows.filter(a => a.created_at >= thirtyDaysAgo).map(a => a.user_id)
       ).size;
-      const activeRate = allReferredIds.length > 0
-        ? parseFloat(((activeUsers / allReferredIds.length) * 100).toFixed(1))
+      const activeRate = tier2Count > 0
+        ? parseFloat(((activeUsers / tier2Count) * 100).toFixed(1))
         : 0;
 
       const { wallets: _w, ...managerBase } = m;
       return {
         ...managerBase,
-        referralCount: allReferredIds.length,
+        tier1Count,
+        tier2Count,
+        referralCount: tier1Count, // backward compatibility
         revenue,
         amount_to_be_paid,
         amount_paid,
@@ -3798,6 +3801,20 @@ const getManagersList = async (req, res) => {
 const getManagerDetail = async (req, res) => {
   try {
     const { managerId } = req.params;
+    const { 
+      page = 1, 
+      limit = 10, 
+      search = '', 
+      tier = '', 
+      status = '', 
+      sort_by = 'created_at', 
+      sort_order = 'desc',
+      tab = 'tier1'
+    } = req.query;
+
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+
     const demoUserIds = await getDemoUserIds();
 
     const { data: manager, error: mErr } = await supabaseAdmin
@@ -3811,13 +3828,14 @@ const getManagerDetail = async (req, res) => {
       return res.status(404).json({ status: 'error', message: 'Manager not found' });
     }
 
-    // Get referred users
+    // Get Tier 1 referred users (direct referrals)
     const { data: referralsRaw } = await supabaseAdmin
       .from('users')
       .select('id, username, full_name, user_tier, account_status, created_at')
       .eq('referred_by', managerId);
 
-    const referredIds = (referralsRaw || []).map(u => u.id);
+    const tier1Users = referralsRaw || [];
+    const tier1Ids = tier1Users.map(u => u.id);
 
     // Fetch manager commission percentage from settings
     const { data: managerPercentSetting } = await supabaseAdmin
@@ -3827,35 +3845,71 @@ const getManagerDetail = async (req, res) => {
       .single();
     const percent = managerPercentSetting ? parseFloat(managerPercentSetting.setting_value) : 9;
 
-    let referredUsersList = [];
     let totalDownlineDeposits = 0;
     let referralsStats = {
-      total: referredIds.length,
+      total: tier1Ids.length,
+      tier2_total: 0,
       pro: 0,
       free: 0,
       active: 0
     };
 
-    if (referredIds.length > 0) {
-      // Get all completed direct game deposits of these referred users
-      const { data: depositsData } = await supabaseAdmin
-        .from('transactions')
-        .select('user_id, amount')
-        .in('user_id', referredIds)
-        .eq('transaction_type', 'deposit')
-        .eq('status', 'completed')
-        .eq('balance_type', 'games_balance');
+    let processedUsersList = [];
+    let tier1List = [];
+    let tier2List = [];
+    const depositsByUserId = {};
+    const tier1ReferralsCount = {};
 
-      // Map deposits
-      const depositsByUserId = {};
-      depositsData?.forEach(d => {
-        depositsByUserId[d.user_id] = (depositsByUserId[d.user_id] || 0) + parseFloat(d.amount || 0);
-        totalDownlineDeposits += parseFloat(d.amount || 0);
+    if (tier1Ids.length > 0) {
+      // Get Tier 2 referred users (referred by Tier 1 users)
+      const { data: tier2Raw } = await supabaseAdmin
+        .from('users')
+        .select('id, username, full_name, user_tier, account_status, created_at, referred_by')
+        .in('referred_by', tier1Ids);
+
+      const tier2Users = tier2Raw || [];
+      const tier2Ids = tier2Users.map(u => u.id);
+
+      referralsStats.tier2_total = tier2Users.length;
+
+      if (tier2Ids.length > 0) {
+        // Get all completed direct game deposits of Tier 2 users
+        const { data: depositsData } = await supabaseAdmin
+          .from('transactions')
+          .select('user_id, amount')
+          .in('user_id', tier2Ids)
+          .eq('transaction_type', 'deposit')
+          .eq('status', 'completed')
+          .eq('balance_type', 'games_balance');
+
+        // Map deposits per user and count total deposits
+        depositsData?.forEach(d => {
+          depositsByUserId[d.user_id] = (depositsByUserId[d.user_id] || 0) + parseFloat(d.amount || 0);
+          totalDownlineDeposits += parseFloat(d.amount || 0);
+        });
+      }
+
+      // Map sub-referrals count for Tier 1 users
+      tier2Users.forEach(u => {
+        tier1ReferralsCount[u.referred_by] = (tier1ReferralsCount[u.referred_by] || 0) + 1;
       });
 
-      referredUsersList = referralsRaw.map(u => {
+      // Construct Tier 1 List
+      tier1List = tier1Users.map(u => ({
+        id: u.id,
+        username: u.username,
+        full_name: u.full_name,
+        user_tier: u.user_tier,
+        account_status: u.account_status,
+        created_at: u.created_at,
+        referrals_count: tier1ReferralsCount[u.id] || 0
+      }));
+
+      // Construct Tier 2 List and update global stats
+      tier2List = tier2Users.map(u => {
         const totalDeposits = depositsByUserId[u.id] || 0;
         const totalCommissionEarned = totalDeposits * (percent / 100);
+        const referrer = tier1Users.find(r => r.id === u.referred_by);
 
         if (u.user_tier === 'Pro') referralsStats.pro++;
         else referralsStats.free++;
@@ -3868,6 +3922,8 @@ const getManagerDetail = async (req, res) => {
           full_name: u.full_name,
           user_tier: u.user_tier,
           account_status: u.account_status,
+          referred_by: u.referred_by,
+          referrer_username: referrer ? referrer.username : 'Unknown',
           created_at: u.created_at,
           total_deposits: totalDeposits,
           commission_earned: totalCommissionEarned
@@ -3875,29 +3931,83 @@ const getManagerDetail = async (req, res) => {
       });
     }
 
+    // Set list based on active tab
+    processedUsersList = tab === 'tier2' ? tier2List : tier1List;
+
+    // Apply filtering to processedUsersList
+    let filteredUsersList = [...processedUsersList];
+
+    if (search) {
+      const queryStr = search.toLowerCase();
+      filteredUsersList = filteredUsersList.filter(u => 
+        u.username?.toLowerCase().includes(queryStr) ||
+        u.full_name?.toLowerCase().includes(queryStr)
+      );
+    }
+
+    if (tier) {
+      filteredUsersList = filteredUsersList.filter(u => u.user_tier === tier);
+    }
+
+    if (status) {
+      filteredUsersList = filteredUsersList.filter(u => u.account_status === status || u.status === status);
+    }
+
+    // Apply sorting
+    filteredUsersList.sort((a, b) => {
+      let valA = a[sort_by];
+      let valB = b[sort_by];
+
+      if (typeof valA === 'string') {
+        valA = valA.toLowerCase();
+        valB = valB?.toLowerCase() || '';
+        return sort_order === 'desc' 
+          ? valB.localeCompare(valA) 
+          : valA.localeCompare(valB);
+      }
+
+      valA = valA ?? 0;
+      valB = valB ?? 0;
+      return sort_order === 'desc' ? valB - valA : valA - valB;
+    });
+
+    // Apply pagination slicing
+    const totalItems = filteredUsersList.length;
+    const totalPages = Math.ceil(totalItems / limitNum);
+    const offset = (pageNum - 1) * limitNum;
+    const paginatedUsersList = filteredUsersList.slice(offset, offset + limitNum);
+
     const walletData = Array.isArray(manager.wallets) ? manager.wallets[0] : manager.wallets;
     const amount_paid = parseFloat(walletData?.total_withdrawn_referral || 0);
     const total_earned = totalDownlineDeposits * (percent / 100);
     const amount_to_be_paid = Math.max(0, total_earned - amount_paid);
 
-    // Get earnings chart data: Group downline deposits in the last 6 months
+    // Get earnings chart data: Group Tier 2 deposits in the last 6 months
     const sixMonthsAgo = new Date();
     sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 5);
     sixMonthsAgo.setDate(1);
     sixMonthsAgo.setHours(0, 0, 0, 0);
 
     let chartDataRaw = [];
-    if (referredIds.length > 0) {
-      const { data } = await supabaseAdmin
-        .from('transactions')
-        .select('amount, created_at')
-        .in('user_id', referredIds)
-        .eq('transaction_type', 'deposit')
-        .eq('status', 'completed')
-        .eq('balance_type', 'games_balance')
-        .gte('created_at', sixMonthsAgo.toISOString())
-        .order('created_at', { ascending: true });
-      chartDataRaw = data || [];
+    if (tier1Ids.length > 0) {
+      const { data: tier2ForChart } = await supabaseAdmin
+        .from('users')
+        .select('id')
+        .in('referred_by', tier1Ids);
+      
+      const tier2IdsFlat = tier2ForChart?.map(u => u.id) || [];
+      if (tier2IdsFlat.length > 0) {
+        const { data } = await supabaseAdmin
+          .from('transactions')
+          .select('amount, created_at')
+          .in('user_id', tier2IdsFlat)
+          .eq('transaction_type', 'deposit')
+          .eq('status', 'completed')
+          .eq('balance_type', 'games_balance')
+          .gte('created_at', sixMonthsAgo.toISOString())
+          .order('created_at', { ascending: true });
+        chartDataRaw = data || [];
+      }
     }
 
     // Group by month-year
@@ -3937,7 +4047,13 @@ const getManagerDetail = async (req, res) => {
           total_downline_deposits: totalDownlineDeposits
         },
         referrals_stats: referralsStats,
-        referred_users: referredUsersList,
+        referred_users: paginatedUsersList,
+        referred_users_pagination: {
+          total_items: totalItems,
+          total_pages: totalPages,
+          current_page: pageNum,
+          limit: limitNum
+        },
         chart_data
       }
     });

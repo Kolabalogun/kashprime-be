@@ -80,16 +80,29 @@ const getDashboard = async (req, res) => {
     const pendingReferrals = referralStats?.filter(r => r.status === 'pending').length || 0;
     const activeReferrals = referralStats?.filter(r => r.status === 'active').length || 0;
 
-    // Calculate total referral earnings directly from transactions for accuracy
-    const { data: rewardTransactions } = await supabaseAdmin
-      .from('transactions')
-      .select('amount')
-      .eq('user_id', userId)
-      .eq('transaction_type', 'reward')
-      .eq('balance_type', 'referral_balance')
-      .eq('status', 'completed');
-      
-    const totalReferralEarnings = rewardTransactions?.reduce((sum, t) => sum + parseFloat(t.amount || 0), 0) || 0;
+    let totalReferralEarnings = 0;
+    let totalReferralsCount = pendingReferrals + activeReferrals;
+
+    if (user?.role === 'manager') {
+      const { calculateManagerReferralBalance } = require('../utils/managerHelper');
+      const dynamicBalance = await calculateManagerReferralBalance(userId);
+      totalReferralEarnings = dynamicBalance.total_earned;
+      totalReferralsCount = dynamicBalance.total_referrals;
+      if (user.wallets) {
+        user.wallets.referral_balance = dynamicBalance.referral_balance;
+      }
+    } else {
+      // Calculate total referral earnings directly from transactions for accuracy
+      const { data: rewardTransactions } = await supabaseAdmin
+        .from('transactions')
+        .select('amount')
+        .eq('user_id', userId)
+        .eq('transaction_type', 'reward')
+        .eq('balance_type', 'referral_balance')
+        .eq('status', 'completed');
+        
+      totalReferralEarnings = rewardTransactions?.reduce((sum, t) => sum + parseFloat(t.amount || 0), 0) || 0;
+    }
 
     const { data: recentTransactions } = await supabaseAdmin
       .from('transactions')
@@ -144,7 +157,7 @@ const getDashboard = async (req, res) => {
       referral_stats: {
         pending_referrals: pendingReferrals,
         active_referrals: activeReferrals,
-        total_referrals: (pendingReferrals + activeReferrals),
+        total_referrals: totalReferralsCount,
         total_earnings: totalReferralEarnings
       },
       recent_transactions: enhancedTransactions,

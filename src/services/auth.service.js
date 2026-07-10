@@ -497,30 +497,68 @@ const getUserReferrals = async (userId) => {
         .single();
       const percent = managerPercentSetting ? parseFloat(managerPercentSetting.setting_value) : 9;
 
-      // Get referred users (downlines)
-      const { data: referredUsers } = await supabaseAdmin
+      // Get Tier 1 referred users (direct downlines)
+      const { data: tier1Users } = await supabaseAdmin
         .from('users')
         .select('id, username, full_name, user_tier, account_status, created_at')
         .eq('referred_by', userId)
         .order('created_at', { ascending: false });
 
-      const referredIds = referredUsers?.map(u => u.id) || [];
+      const tier1List = tier1Users || [];
+      const tier1Ids = tier1List.map(u => u.id);
+
+      let tier2List = [];
       let userDeposits = {};
       let totalDeposits = 0;
+      const tier1ReferralsCount = {};
 
-      if (referredIds.length > 0) {
-        // Only game deposits count for manager: balance_type = 'games_balance'
-        const { data: depositsData } = await supabaseAdmin
-          .from('transactions')
-          .select('user_id, amount')
-          .in('user_id', referredIds)
-          .eq('transaction_type', 'deposit')
-          .eq('status', 'completed')
-          .eq('balance_type', 'games_balance');
+      if (tier1Ids.length > 0) {
+        // Get Tier 2 referred users (referred by Tier 1 users)
+        const { data: tier2Users } = await supabaseAdmin
+          .from('users')
+          .select('id, username, full_name, user_tier, account_status, created_at, referred_by')
+          .in('referred_by', tier1Ids)
+          .order('created_at', { ascending: false });
 
-        depositsData?.forEach(d => {
-          userDeposits[d.user_id] = (userDeposits[d.user_id] || 0) + parseFloat(d.amount || 0);
-          totalDeposits += parseFloat(d.amount || 0);
+        const tier2Raw = tier2Users || [];
+        const tier2Ids = tier2Raw.map(u => u.id);
+
+        if (tier2Ids.length > 0) {
+          // Only game deposits count for manager: balance_type = 'games_balance'
+          const { data: depositsData } = await supabaseAdmin
+            .from('transactions')
+            .select('user_id, amount')
+            .in('user_id', tier2Ids)
+            .eq('transaction_type', 'deposit')
+            .eq('status', 'completed')
+            .eq('balance_type', 'games_balance');
+
+          depositsData?.forEach(d => {
+            userDeposits[d.user_id] = (userDeposits[d.user_id] || 0) + parseFloat(d.amount || 0);
+            totalDeposits += parseFloat(d.amount || 0);
+          });
+        }
+
+        // Map sub-referral counts for Tier 1
+        tier2Raw.forEach(u => {
+          tier1ReferralsCount[u.referred_by] = (tier1ReferralsCount[u.referred_by] || 0) + 1;
+        });
+
+        tier2List = tier2Raw.map(u => {
+          const totalDep = userDeposits[u.id] || 0;
+          const referrer = tier1List.find(r => r.id === u.referred_by);
+          return {
+            id: u.id,
+            username: u.username,
+            full_name: u.full_name,
+            user_tier: u.user_tier,
+            status: u.account_status,
+            referred_by: u.referred_by,
+            referrer_username: referrer ? referrer.username : 'Unknown',
+            total_deposits: totalDep,
+            reward_amount: totalDep * (percent / 100),
+            created_at: u.created_at
+          };
         });
       }
 
@@ -535,24 +573,34 @@ const getUserReferrals = async (userId) => {
       const totalEarned = totalDeposits * (percent / 100);
       const referralBalance = Math.max(0, totalEarned - totalWithdrawn);
 
-      // Get 6-month deposits trend to group by month
+      // Get 6-month deposits trend to group by month for Tier 2 deposits
       const sixMonthsAgo = new Date();
       sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 5);
       sixMonthsAgo.setDate(1);
       sixMonthsAgo.setHours(0, 0, 0, 0);
 
       let chartDataRaw = [];
-      if (referredIds.length > 0) {
-        const { data } = await supabaseAdmin
-          .from('transactions')
-          .select('amount, created_at')
-          .in('user_id', referredIds)
-          .eq('transaction_type', 'deposit')
-          .eq('status', 'completed')
-          .eq('balance_type', 'games_balance')
-          .gte('created_at', sixMonthsAgo.toISOString())
-          .order('created_at', { ascending: true });
-        chartDataRaw = data || [];
+      const tier1IdsFlat = tier1Ids;
+      if (tier1IdsFlat.length > 0) {
+        // Fetch all Tier 2 users again to get their IDs
+        const { data: tier2ForChart } = await supabaseAdmin
+          .from('users')
+          .select('id')
+          .in('referred_by', tier1IdsFlat);
+        
+        const tier2IdsFlat = tier2ForChart?.map(u => u.id) || [];
+        if (tier2IdsFlat.length > 0) {
+          const { data } = await supabaseAdmin
+            .from('transactions')
+            .select('amount, created_at')
+            .in('user_id', tier2IdsFlat)
+            .eq('transaction_type', 'deposit')
+            .eq('status', 'completed')
+            .eq('balance_type', 'games_balance')
+            .gte('created_at', sixMonthsAgo.toISOString())
+            .order('created_at', { ascending: true });
+          chartDataRaw = data || [];
+        }
       }
 
       // Group by month-year
@@ -576,32 +624,35 @@ const getUserReferrals = async (userId) => {
         .map(([month, amount]) => ({ month, amount }))
         .reverse();
 
-      // Gather active referrals statistics
+      const mappedTier1List = tier1List.map(u => ({
+        id: u.id,
+        username: u.username,
+        full_name: u.full_name,
+        user_tier: u.user_tier,
+        status: u.account_status,
+        created_at: u.created_at,
+        referrals_count: tier1ReferralsCount[u.id] || 0
+      }));
+
+      // Gather active referrals statistics based on Tier 2 network
       const referralsStats = {
-        total: referredIds.length,
-        pro: referredUsers?.filter(u => u.user_tier === 'Pro').length || 0,
-        free: referredUsers?.filter(u => u.user_tier !== 'Pro').length || 0,
-        active: referredUsers?.filter(u => u.account_status === 'active').length || 0
+        total: tier1List.length,
+        tier2_total: tier2List.length,
+        pro: tier2List.filter(u => u.user_tier === 'Pro').length || 0,
+        free: tier2List.filter(u => u.user_tier !== 'Pro').length || 0,
+        active: tier2List.filter(u => u.status === 'active').length || 0
       };
 
       return {
         is_manager: true,
-        total_referrals: referredUsers?.length || 0,
+        total_referrals: tier1List.length,
         total_earnings: totalEarned,
         referral_balance: referralBalance,
         total_withdrawn: totalWithdrawn,
         total_downline_deposits: totalDeposits,
         referrals_stats: referralsStats,
-        direct_referrals: referredUsers?.map(u => ({
-          id: u.id,
-          username: u.username,
-          full_name: u.full_name,
-          user_tier: u.user_tier,
-          status: u.account_status,
-          reward_amount: (userDeposits[u.id] || 0) * (percent / 100),
-          created_at: u.created_at,
-          total_deposits: userDeposits[u.id] || 0
-        })) || [],
+        tier1_users: mappedTier1List,
+        tier2_users: tier2List,
         chart_data: chartData
       };
     }
