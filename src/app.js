@@ -39,59 +39,42 @@ const app = express();
 app.set("trust proxy", 1);
 
 
-const allowedOrigins = [
+// Default whitelist, extendable via CORS_ALLOWED_ORIGINS without a code change/redeploy
+// e.g. CORS_ALLOWED_ORIGINS="https://staging.kashprime.com,https://foo.kashprime.com"
+const DEFAULT_ALLOWED_ORIGINS = [
   "http://localhost:3000",
   "http://localhost:5173",
-
   "https://kashprime.com",
   "https://www.kashprime.com",
   "https://kashprime-production.up.railway.app",
-
 ];
 
-// Robust CORS implementation
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
+const envOrigins = (process.env.CORS_ALLOWED_ORIGINS || "")
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
 
-  // Always set CORS headers to prevent the browser from throwing a loud CORS error
-  // which exposes the endpoint in the console.
-  if (origin) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-    res.setHeader("Access-Control-Allow-Credentials", "true");
-  } else {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-  }
+const allowedOrigins = [...new Set([...DEFAULT_ALLOWED_ORIGINS, ...envOrigins])];
 
-  res.setHeader(
-    "Access-Control-Allow-Methods",
-    "GET, POST, PUT, DELETE, PATCH, OPTIONS"
-  );
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-Requested-With, Accept, Origin"
-  );
+app.use(cors({
+  origin: (origin, callback) => {
+    // No origin header = same-origin/server-to-server/curl request, allow it
+    if (!origin) return callback(null, true);
 
-  // Handle preflight (OPTIONS)
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
+    const cleanOrigin = origin.replace(/\/$/, "");
+    if (allowedOrigins.includes(cleanOrigin)) {
+      return callback(null, true);
+    }
 
-  // Perform custom origin check for the actual request
-  const cleanOrigin = origin ? origin.replace(/\/$/, "") : null;
-  
-  if (cleanOrigin && !allowedOrigins.includes(cleanOrigin)) {
-    // Return a custom, friendly error message instead of a CORS error
-    return res.status(403).json({
-      status: "error",
-      message: "Access forbidden. Please contact support if you believe this is an error."
-    });
-  }
-
-  next();
-});
-
-// We can remove the redundant cors() package call to avoid conflicts,
-// since our robust custom middleware handles everything now.
+    console.warn(`CORS blocked request from origin: ${origin}`);
+    const err = new Error("Access forbidden. Please contact support if you believe this is an error.");
+    err.status = 403;
+    return callback(err);
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"],
+}));
 
 
 // Security middleware
