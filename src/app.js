@@ -83,18 +83,29 @@ app.use(helmet({
   contentSecurityPolicy: false, // Disable CSP for local dev if needed, or configure it properly
 }));
 
-// // Rate limiting
-// const limiter = rateLimit({
-//   windowMs: 15 * 60 * 1000, // 15 minutes
-//   max: 200,
-//   message: "Too many requests from this IP, please try again later.",
-// });
-// app.use("/api/", limiter);
+// Rate limiting - caps request bursts per IP so a spam-click, broken autoplay
+// loop, or scripted flood can't pile up enough concurrent work to stall the
+// whole event loop for every user (see 2026-07-14/07-15 CPU-exhaustion incidents).
+const limiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.method === "OPTIONS",
+  message: {
+    status: "error",
+    message: "Too many requests. Please slow down and try again shortly.",
+  },
+});
+app.use("/api/", limiter);
 
 // Body parsing middleware
 app.use('/api/payments/webhook', express.raw({ type: 'application/json' }));
-app.use(express.json({ limit: "500mb" }));
-app.use(express.urlencoded({ extended: true, limit: "500mb" }));
+// File uploads go through multer (see upload.middleware.js), which has its own
+// 5MB limit - JSON/urlencoded bodies here never need to be anywhere near that,
+// so keep this small to avoid a single request buffering huge payloads in memory.
+app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ extended: true, limit: "2mb" }));
 
 // Logging middleware
 if (process.env.NODE_ENV === "development") {
