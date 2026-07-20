@@ -85,7 +85,8 @@ const login = async (req, res) => {
 
   } catch (error) {
     console.error('Login error:', error);
-    res.status(401).json(
+    const status = error.message === MESSAGES.ERROR.ACCOUNT_LOCKED ? 403 : 401;
+    res.status(status).json(
       formatResponse('error', error.message)
     );
   }

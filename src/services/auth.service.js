@@ -145,6 +145,9 @@ const registerUser = async (userData) => {
 };
 
 // Login user
+const MAX_FAILED_LOGIN_ATTEMPTS = 5;
+const LOGIN_LOCKOUT_DURATION_MS = 15 * 60 * 1000; // 15 minutes
+
 const loginUser = async (credential, password) => {
   try {
     // Check if credential is email or username
@@ -163,19 +166,34 @@ const loginUser = async (credential, password) => {
       throw new Error(MESSAGES.ERROR.INVALID_CREDENTIALS);
     }
 
+    // Reject before the bcrypt.compare below - a locked account must not pay
+    // the CPU cost of hashing, otherwise a distributed credential-stuffing
+    // burst can still peg the event loop even while "locked" (see 2026-07-20
+    // CPU-exhaustion incident).
+    if (user.login_locked_until && new Date(user.login_locked_until) > new Date()) {
+      throw new Error(MESSAGES.ERROR.ACCOUNT_LOCKED);
+    }
+
     // Verify password
     const isValidPassword = await comparePassword(password, user.password);
 
     if (!isValidPassword) {
-      // Increment failed login attempts
+      const failedAttempts = (user.failed_login_attempts || 0) + 1;
+      const isNowLocked = failedAttempts >= MAX_FAILED_LOGIN_ATTEMPTS;
+
       await supabaseAdmin
         .from('users')
-        .update({
-          failed_login_attempts: (user.failed_login_attempts || 0) + 1
-        })
+        .update(
+          isNowLocked
+            ? {
+                failed_login_attempts: 0,
+                login_locked_until: new Date(Date.now() + LOGIN_LOCKOUT_DURATION_MS).toISOString(),
+              }
+            : { failed_login_attempts: failedAttempts }
+        )
         .eq('id', user.id);
 
-      throw new Error(MESSAGES.ERROR.INVALID_CREDENTIALS);
+      throw new Error(isNowLocked ? MESSAGES.ERROR.ACCOUNT_LOCKED : MESSAGES.ERROR.INVALID_CREDENTIALS);
     }
 
     // Get referrer info if exists
@@ -201,7 +219,8 @@ const loginUser = async (credential, password) => {
       .from('users')
       .update({
         last_login_at: new Date().toISOString(),
-        failed_login_attempts: 0
+        failed_login_attempts: 0,
+        login_locked_until: null
       })
       .eq('id', user.id);
 

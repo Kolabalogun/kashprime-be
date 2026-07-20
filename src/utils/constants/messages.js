@@ -35,7 +35,8 @@ const MESSAGES = {
     ALREADY_PRO: 'Your account is already a Pro account',
     CODE_REQUIRED: 'Upgrade code is required',
     UPGRADE_FAILED: 'Failed to upgrade account',
-    
+    ACCOUNT_LOCKED: 'Too many failed login attempts. Please try again in a few minutes.',
+
 
 
     
