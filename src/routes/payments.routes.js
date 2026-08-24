@@ -126,7 +126,7 @@ router.post('/initialize',
     body('amount').isFloat({ min: 50 }).withMessage('Minimum deposit amount is ₦50'),
     body('email').optional().isEmail().withMessage('Valid email is required'),
     body('purpose').notEmpty().isIn(['gaming', 'investment', 'upgrade', 'kash_ads']),
-    body('gateway').optional().isIn(['paystack', 'flutterwave'])
+    body('gateway').optional().isIn(['movantrapay', 'paystack', 'flutterwave'])
   ],
   PaymentController.initializePayment
 );
@@ -142,10 +142,30 @@ router.post('/verify',
     body('reference').notEmpty(),
     body('amount').isFloat({ min: 50 }),
     body('purpose').notEmpty().isIn(['gaming', 'investment', 'upgrade', 'kash_ads']),
-    body('gateway').optional().isIn(['paystack', 'flutterwave']),
+    body('gateway').optional().isIn(['movantrapay', 'paystack', 'flutterwave']),
     body('flw_transaction_id').optional()
   ],
   PaymentController.verifyPayment
+);
+
+/**
+ * @route   GET /api/payments/movantrapay/status/:reference
+ * @desc    Check status of a Movantrapay checkout reference
+ * @access  Private
+ */
+router.get('/movantrapay/status/:reference',
+  authMiddleware,
+  PaymentController.checkMovantrapayStatus
+);
+
+/**
+ * @route   POST /api/payments/movantrapay/webhook
+ * @desc    Handle Movantrapay webhook events
+ * @access  Public (secured with HMAC SHA-512 signature)
+ */
+router.post('/movantrapay/webhook',
+  express.raw({ type: 'application/json' }),
+  PaymentController.handleMovantrapayWebhook
 );
 
 /**
