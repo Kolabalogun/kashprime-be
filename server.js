@@ -15,6 +15,8 @@ const app = require('./src/app');
 
 
 
+const { autoProcessDuePayouts } = require('./src/controllers/investment.controller');
+
 const PORT = process.env.PORT || 8082;
 
 const server = app.listen(PORT, () => {
@@ -22,6 +24,12 @@ const server = app.listen(PORT, () => {
   console.log(`📱 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`🌐 API Base URL: http://localhost:${PORT}/api`);
   console.log(`🏥 Health Check: http://localhost:${PORT}/health`);
+
+  // Run autoProcessDuePayouts initial check + periodic interval (every 2 minutes)
+  autoProcessDuePayouts().catch(err => console.error('Initial payout job error:', err));
+  setInterval(() => {
+    autoProcessDuePayouts().catch(err => console.error('Background payout job error:', err));
+  }, 120 * 1000);
 });   
 
 // Gracefull shutdown handling

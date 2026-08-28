@@ -52,11 +52,11 @@ class PaymentController {
       }
 
       // Validate purpose
-      const validPurposes = ['gaming', 'investment', 'upgrade', 'kash_ads'];
+      const validPurposes = ['gaming', 'investment', 'investment_recharge', 'upgrade', 'kash_ads'];
       if (!purpose || !validPurposes.includes(purpose)) {
         return res.status(400).json({
           success: false,
-          message: 'Purpose must be one of: gaming, investment, upgrade, kash_ads'
+          message: 'Purpose must be one of: gaming, investment, investment_recharge, upgrade, kash_ads'
         });
       }
 
@@ -103,6 +103,23 @@ class PaymentController {
         }
       }
 
+      // Additional validation for investment_recharge
+      if (purpose === 'investment_recharge') {
+        const { data: minDepositSetting } = await supabaseAdmin
+          .from('platform_settings')
+          .select('setting_value')
+          .eq('setting_key', 'min_deposit_investment')
+          .single();
+
+        const minInvestDeposit = minDepositSetting ? parseFloat(minDepositSetting.setting_value) : 3000;
+        if (amount < minInvestDeposit) {
+          return res.status(400).json({
+            success: false,
+            message: `Minimum deposit for investment balance is ₦${minInvestDeposit.toLocaleString()}`
+          });
+        }
+      }
+
       // Additional validation for investment
       let investmentPlanConfig = null;
       if (purpose === 'investment') {
@@ -120,12 +137,24 @@ class PaymentController {
           .eq('setting_key', 'investments_enabled')
           .single();
 
-        if (investmentsSetting?.setting_value !== 'true') {
-          return res.status(403).json({
-            success: false,
-            message: 'Investments are currently disabled'
-          });
+        if (investmentsSetting?.setting_value === 'false') {
+          await supabaseAdmin
+            .from('platform_settings')
+            .upsert({ setting_key: 'investments_enabled', setting_value: 'true', updated_at: new Date().toISOString() }, { onConflict: 'setting_key' });
         }
+
+        const defaultAgroPlans = [
+          { name: 'agro_press_1', capital: 3000, daily_return: 200, cycle_days: 90 },
+          { name: 'agro_press_2', capital: 8000, daily_return: 550, cycle_days: 90 },
+          { name: 'agro_press_3', capital: 10000, daily_return: 700, cycle_days: 90 },
+          { name: 'agro_press_4', capital: 25000, daily_return: 2500, cycle_days: 90 },
+          { name: 'agro_press_5', capital: 50000, daily_return: 5500, cycle_days: 90 },
+          { name: 'agro_press_6', capital: 100000, daily_return: 9000, cycle_days: 90 },
+          { name: 'agro_press_7', capital: 200000, daily_return: 35000, cycle_days: 90 },
+          { name: 'agro_press_8', capital: 500000, daily_return: 60000, cycle_days: 90 },
+        ];
+
+        const targetDefault = defaultAgroPlans.find(p => p.name === plan_name);
 
         // Get plan settings
         const { data: planSettings } = await supabaseAdmin
@@ -139,31 +168,24 @@ class PaymentController {
           planConfig[key] = s.setting_value;
         });
 
+        const capitalAmount = parseFloat(planConfig.amount || targetDefault?.capital || 0);
+        const dailyReturn = parseFloat(planConfig.daily_return || targetDefault?.daily_return || 0);
+        const cycleDays = parseInt(planConfig.cycle_days || targetDefault?.cycle_days || 90);
+
         // Validate plan exists and is enabled
-        if (!planConfig.amount || !planConfig.roi_percent) {
+        if (!capitalAmount) {
           return res.status(400).json({
             success: false,
             message: 'Invalid investment plan'
           });
         }
 
-        if (planConfig.enabled !== 'true') {
+        if (planConfig.enabled === 'false') {
           return res.status(403).json({
             success: false,
             message: 'This investment plan is currently disabled'
           });
         }
-
-        // Check user tier restrictions
-        const proOnlyPlans = ['pro', 'master'];
-        if (proOnlyPlans.includes(plan_name) && user.user_tier !== 'Pro') {
-          return res.status(403).json({
-            success: false,
-            message: 'This plan is only available for Pro users'
-          });
-        }
-
-        const capitalAmount = parseFloat(planConfig.amount);
 
         // Verify amount matches plan capital
         if (amount !== capitalAmount) {
@@ -177,7 +199,9 @@ class PaymentController {
         investmentPlanConfig = {
           plan_name,
           capital_amount: capitalAmount,
-          roi_percent: parseFloat(planConfig.roi_percent)
+          daily_return: dailyReturn,
+          cycle_days: cycleDays,
+          weekly_payout: dailyReturn ? (dailyReturn * 7) : (capitalAmount * 0.2)
         };
       }
 
@@ -318,7 +342,7 @@ class PaymentController {
         });
       }
 
-      const validPurposes = ['gaming', 'investment', 'upgrade', 'kash_ads'];
+      const validPurposes = ['gaming', 'investment', 'investment_recharge', 'upgrade', 'kash_ads'];
       if (!validPurposes.includes(purpose)) {
         return res.status(400).json({
           success: false,
@@ -453,7 +477,8 @@ class PaymentController {
 
       } else if (purpose === 'investment') {
         responseData = await PaymentController.processInvestmentDeposit(userId, paidAmount, reference, verificationData, gatewayName);
-
+      } else if (purpose === 'investment_recharge') {
+        responseData = await PaymentController.processInvestmentRechargeDeposit(userId, paidAmount, reference, verificationData, gatewayName);
       } else if (purpose === 'upgrade') {
         responseData = await PaymentController.processUpgrade(userId, paidAmount, reference, verificationData, gatewayName);
       } else if (purpose === 'kash_ads') {
@@ -562,6 +587,8 @@ class PaymentController {
         responseData = await PaymentController.processGamingDeposit(userId, paidAmount, tx_ref, verificationData, 'Flutterwave');
       } else if (purpose === 'investment') {
         responseData = await PaymentController.processInvestmentDeposit(userId, paidAmount, tx_ref, verificationData, 'Flutterwave');
+      } else if (purpose === 'investment_recharge') {
+        responseData = await PaymentController.processInvestmentRechargeDeposit(userId, paidAmount, tx_ref, verificationData, 'Flutterwave');
       } else if (purpose === 'upgrade') {
         responseData = await PaymentController.processUpgrade(userId, paidAmount, tx_ref, verificationData, 'Flutterwave');
       }
@@ -802,6 +829,61 @@ class PaymentController {
       first_deposit_bonus_applied: isFirstGamingDeposit,
       bonus_amount: bonusAmount,
       wallet_type: 'gaming'
+    };
+  }
+
+  // Process investment wallet recharge (deposit directly to investment_balance)
+  static async processInvestmentRechargeDeposit(userId, paidAmount, reference, verificationData, gatewayName = 'Paystack') {
+    const { data: wallet, error: walletError } = await supabaseAdmin
+      .from('wallets')
+      .select('investment_balance')
+      .eq('user_id', userId)
+      .single();
+
+    if (walletError || !wallet) {
+      throw new Error('Wallet not found');
+    }
+
+    const currentBalance = parseFloat(wallet.investment_balance || 0);
+    const newInvestmentBalance = currentBalance + paidAmount;
+
+    const { error: updateError } = await supabaseAdmin
+      .from('wallets')
+      .update({ investment_balance: newInvestmentBalance })
+      .eq('user_id', userId);
+
+    if (updateError) {
+      throw updateError;
+    }
+
+    await supabaseAdmin
+      .from('transactions')
+      .insert({
+        user_id: userId,
+        transaction_type: 'deposit',
+        balance_type: 'investment_balance',
+        amount: paidAmount,
+        currency: 'NGN',
+        status: 'completed',
+        reference: reference,
+        description: `Investment wallet deposit - ₦${paidAmount.toLocaleString()} via ${gatewayName}`,
+        metadata: verificationData,
+        created_at: new Date().toISOString()
+      });
+
+    PaymentController.processReferralCommission(userId, paidAmount, reference, 'investment_balance');
+
+    await logActivity(userId, 'investment_recharge_complete', {
+      amount: paidAmount,
+      before_balance: currentBalance,
+      after_balance: newInvestmentBalance,
+      reference_id: reference,
+      status: 'success'
+    });
+
+    return {
+      new_investment_balance: newInvestmentBalance,
+      wallet_type: 'investment'
     };
   }
 

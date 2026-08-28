@@ -1,6 +1,17 @@
 const { supabaseAdmin } = require('../services/supabase.service');
 const { validationResult } = require('express-validator');
 
+const defaultAgroPlans = [
+  { name: 'agro_press_1', display_name: 'Agro Press Level 1', capital: 3000, daily_return: 200, cycle_days: 90 },
+  { name: 'agro_press_2', display_name: 'Agro Press Level 2', capital: 8000, daily_return: 550, cycle_days: 90 },
+  { name: 'agro_press_3', display_name: 'Agro Press Level 3', capital: 10000, daily_return: 700, cycle_days: 90 },
+  { name: 'agro_press_4', display_name: 'Agro Press Level 4', capital: 25000, daily_return: 2500, cycle_days: 90 },
+  { name: 'agro_press_5', display_name: 'Agro Press Level 5', capital: 50000, daily_return: 5500, cycle_days: 90 },
+  { name: 'agro_press_6', display_name: 'Agro Press Level 6', capital: 100000, daily_return: 9000, cycle_days: 90 },
+  { name: 'agro_press_7', display_name: 'Agro Press Level 7', capital: 200000, daily_return: 35000, cycle_days: 90 },
+  { name: 'agro_press_8', display_name: 'Agro Press Level 8', capital: 500000, daily_return: 60000, cycle_days: 90 },
+];
+
 // Get available investment plans
 const getPlans = async (req, res) => {
   try {
@@ -13,7 +24,7 @@ const getPlans = async (req, res) => {
       .eq('id', userId)
       .single();
 
-    if (userError) {
+    if (userError || !user) {
       return res.status(404).json({
         status: 'error',
         message: 'User not found'
@@ -26,112 +37,43 @@ const getPlans = async (req, res) => {
       .select('setting_key, setting_value')
       .or('setting_key.like.investment_plan_%,setting_key.eq.investments_enabled');
 
-    // Convert settings to object
     const settingsMap = {};
     settings?.forEach(s => {
       settingsMap[s.setting_key] = s.setting_value;
     });
 
-    // Check if investments are enabled
-    if (settingsMap['investments_enabled'] !== 'true') {
-      return res.status(403).json({
-        status: 'error',
-        message: 'Investments are currently disabled'
-      });
+    if (settingsMap['investments_enabled'] === 'false') {
+      await supabaseAdmin
+        .from('platform_settings')
+        .upsert({ setting_key: 'investments_enabled', setting_value: 'true', updated_at: new Date().toISOString() }, { onConflict: 'setting_key' });
+      settingsMap['investments_enabled'] = 'true';
     }
 
-    // Build plans array
-    const plans = [
-      {
-        name: 'beginner',
-        display_name: 'Beginner',
-        capital: parseFloat(settingsMap['investment_plan_beginner_amount'] || 10000),
-        roi_percent: parseFloat(settingsMap['investment_plan_beginner_roi_percent'] || 20),
-        weekly_payout: parseFloat(settingsMap['investment_plan_beginner_amount'] || 10000) * 
-                      (parseFloat(settingsMap['investment_plan_beginner_roi_percent'] || 20) / 100),
-        total_return: (parseFloat(settingsMap['investment_plan_beginner_amount'] || 10000) * 
-                     (parseFloat(settingsMap['investment_plan_beginner_roi_percent'] || 20) / 100) * 6) + 
-                     parseFloat(settingsMap['investment_plan_beginner_amount'] || 10000),
-        duration_weeks: 6,
-        enabled: settingsMap['investment_plan_beginner_enabled'] !== 'false',
-        available_for: ['Free', 'Pro']
-      },
-      {
-        name: 'starter',
-        display_name: 'Starter',
-        capital: parseFloat(settingsMap['investment_plan_starter_amount'] || 20000),
-        roi_percent: parseFloat(settingsMap['investment_plan_starter_roi_percent'] || 20),
-        weekly_payout: parseFloat(settingsMap['investment_plan_starter_amount'] || 20000) * 
-                      (parseFloat(settingsMap['investment_plan_starter_roi_percent'] || 20) / 100),
-        total_return: (parseFloat(settingsMap['investment_plan_starter_amount'] || 20000) * 
-                     (parseFloat(settingsMap['investment_plan_starter_roi_percent'] || 20) / 100) * 6) +
-                     parseFloat(settingsMap['investment_plan_starter_amount'] || 20000),
-        duration_weeks: 6,
-        enabled: settingsMap['investment_plan_starter_enabled'] === 'true',
-        available_for: ['Free', 'Pro']
-      },
-      {
-        name: 'amateur',
-        display_name: 'Amateur',
-        capital: parseFloat(settingsMap['investment_plan_amateur_amount'] || 50000),
-        roi_percent: parseFloat(settingsMap['investment_plan_amateur_roi_percent'] || 20),
-        weekly_payout: parseFloat(settingsMap['investment_plan_amateur_amount'] || 50000) * 
-                      (parseFloat(settingsMap['investment_plan_amateur_roi_percent'] || 20) / 100),
-        total_return: (parseFloat(settingsMap['investment_plan_amateur_amount'] || 50000) * 
-                     (parseFloat(settingsMap['investment_plan_amateur_roi_percent'] || 20) / 100) * 6) +
-                     parseFloat(settingsMap['investment_plan_amateur_amount'] || 50000),
-        duration_weeks: 6,
-        enabled: settingsMap['investment_plan_amateur_enabled'] === 'true',
-        available_for: ['Free', 'Pro']
-      },
-      {
-        name: 'semi_amateur',
-        display_name: 'Semi-Amateur',
-        capital: parseFloat(settingsMap['investment_plan_semi_amateur_amount'] || 100000),
-        roi_percent: parseFloat(settingsMap['investment_plan_semi_amateur_roi_percent'] || 20),
-        weekly_payout: parseFloat(settingsMap['investment_plan_semi_amateur_amount'] || 100000) * 
-                      (parseFloat(settingsMap['investment_plan_semi_amateur_roi_percent'] || 20) / 100),
-        total_return: (parseFloat(settingsMap['investment_plan_semi_amateur_amount'] || 100000) * 
-                     (parseFloat(settingsMap['investment_plan_semi_amateur_roi_percent'] || 20) / 100) * 6) +
-                     parseFloat(settingsMap['investment_plan_semi_amateur_amount'] || 100000),
-        duration_weeks: 6,
-        enabled: settingsMap['investment_plan_semi_amateur_enabled'] === 'true',
-        available_for: ['Free', 'Pro']
-      },
-      {
-        name: 'pro',
-        display_name: 'Pro',
-        capital: parseFloat(settingsMap['investment_plan_pro_amount'] || 160000),
-        roi_percent: parseFloat(settingsMap['investment_plan_pro_roi_percent'] || 25),
-        weekly_payout: parseFloat(settingsMap['investment_plan_pro_amount'] || 160000) * 
-                      (parseFloat(settingsMap['investment_plan_pro_roi_percent'] || 25) / 100),
-        total_return: (parseFloat(settingsMap['investment_plan_pro_amount'] || 160000) * 
-                     (parseFloat(settingsMap['investment_plan_pro_roi_percent'] || 25) / 100) * 6) +
-                     parseFloat(settingsMap['investment_plan_pro_amount'] || 160000),
-        duration_weeks: 6,
-        enabled: settingsMap['investment_plan_pro_enabled'] === 'true',
-        available_for: ['Pro']
-      },
-      {
-        name: 'master',
-        display_name: 'Master',
-        capital: parseFloat(settingsMap['investment_plan_master_amount'] || 250000),
-        roi_percent: parseFloat(settingsMap['investment_plan_master_roi_percent'] || 25),
-        weekly_payout: parseFloat(settingsMap['investment_plan_master_amount'] || 250000) * 
-                      (parseFloat(settingsMap['investment_plan_master_roi_percent'] || 25) / 100),
-        total_return: (parseFloat(settingsMap['investment_plan_master_amount'] || 250000) * 
-                     (parseFloat(settingsMap['investment_plan_master_roi_percent'] || 25) / 100) * 6) +
-                     parseFloat(settingsMap['investment_plan_master_amount'] || 250000),
-        duration_weeks: 6,
-        enabled: settingsMap['investment_plan_master_enabled'] === 'true',
-        available_for: ['Pro']
-      }
-    ];
+    // Build plans array using Agro Press levels
+    const plans = defaultAgroPlans.map(plan => {
+      const capital = parseFloat(settingsMap[`investment_plan_${plan.name}_amount`] || plan.capital);
+      const dailyReturn = parseFloat(settingsMap[`investment_plan_${plan.name}_daily_return`] || plan.daily_return);
+      const cycleDays = parseInt(settingsMap[`investment_plan_${plan.name}_cycle_days`] || plan.cycle_days);
+      const enabled = settingsMap[`investment_plan_${plan.name}_enabled`] !== 'false';
+      const weeklyPayout = dailyReturn * 7;
+      const totalReturn = dailyReturn * cycleDays;
 
-    // Filter plans based on user tier and enabled status
-    const availablePlans = plans.filter(plan => 
-      plan.enabled && plan.available_for.includes(user.user_tier)
-    );
+      return {
+        name: plan.name,
+        display_name: plan.display_name,
+        capital,
+        daily_return: dailyReturn,
+        cycle_days: cycleDays,
+        weekly_payout: weeklyPayout,
+        total_return: totalReturn,
+        duration_weeks: Math.round(cycleDays / 7),
+        roi_percent: Math.round(((totalReturn - capital) / capital) * 100),
+        enabled,
+        available_for: ['Free', 'Pro']
+      };
+    });
+
+    const availablePlans = plans.filter(p => p.enabled);
 
     res.json({
       status: 'success',
@@ -151,10 +93,262 @@ const getPlans = async (req, res) => {
   }
 };
 
+// Invest using user wallet balance (investment_balance or games_balance)
+const investFromBalance = async (req, res) => {
+  try {
+    const { plan_name, source_balance = 'investment_balance' } = req.body;
+    const userId = req.user.id;
+
+    if (!['investment_balance', 'games_balance'].includes(source_balance)) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Invalid balance source. Choose investment_balance or games_balance.'
+      });
+    }
+
+    const { data: settings } = await supabaseAdmin
+      .from('platform_settings')
+      .select('setting_key, setting_value');
+
+    const settingsMap = {};
+    settings?.forEach(s => { settingsMap[s.setting_key] = s.setting_value; });
+
+    if (settingsMap['investments_enabled'] === 'false') {
+      await supabaseAdmin
+        .from('platform_settings')
+        .upsert({ setting_key: 'investments_enabled', setting_value: 'true', updated_at: new Date().toISOString() }, { onConflict: 'setting_key' });
+      settingsMap['investments_enabled'] = 'true';
+    }
+
+    const targetDefault = defaultAgroPlans.find(p => p.name === plan_name);
+    if (!targetDefault) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Invalid investment plan selected'
+      });
+    }
+
+    const capital = parseFloat(settingsMap[`investment_plan_${plan_name}_amount`] || targetDefault.capital);
+    const dailyReturn = parseFloat(settingsMap[`investment_plan_${plan_name}_daily_return`] || targetDefault.daily_return);
+    const cycleDays = parseInt(settingsMap[`investment_plan_${plan_name}_cycle_days`] || targetDefault.cycle_days);
+    const isEnabled = settingsMap[`investment_plan_${plan_name}_enabled`] !== 'false';
+
+    if (!isEnabled) {
+      return res.status(403).json({
+        status: 'error',
+        message: 'This investment plan is currently disabled'
+      });
+    }
+
+    // Check user wallet
+    const { data: wallet, error: walletError } = await supabaseAdmin
+      .from('wallets')
+      .select('investment_balance, games_balance')
+      .eq('user_id', userId)
+      .single();
+
+    if (walletError || !wallet) {
+      return res.status(404).json({ status: 'error', message: 'Wallet not found' });
+    }
+
+    const availableBal = parseFloat(wallet[source_balance] || 0);
+    if (availableBal < capital) {
+      return res.status(400).json({
+        status: 'error',
+        message: `Insufficient balance in ${source_balance === 'investment_balance' ? 'Investment' : 'Games'} wallet. Required: ₦${capital.toLocaleString()}`
+      });
+    }
+
+    // Deduct balance
+    const newBal = availableBal - capital;
+    const updateObj = {};
+    updateObj[source_balance] = newBal;
+
+    const { error: updateErr } = await supabaseAdmin
+      .from('wallets')
+      .update(updateObj)
+      .eq('user_id', userId);
+
+    if (updateErr) throw updateErr;
+
+    const weeklyPayout = dailyReturn * 7;
+    const totalReturn = dailyReturn * cycleDays;
+    const startDate = new Date();
+    const nextPayoutDate = new Date(startDate);
+    nextPayoutDate.setDate(nextPayoutDate.getDate() + 1); // Next daily payout in 24h
+
+    const endDate = new Date(startDate);
+    endDate.setDate(endDate.getDate() + cycleDays);
+
+    const reference = `INV_BAL_${plan_name.toUpperCase()}_${userId.slice(-6)}_${Date.now()}`;
+
+    const { data: investment, error: invErr } = await supabaseAdmin
+      .from('investments')
+      .insert({
+        user_id: userId,
+        plan_name: plan_name,
+        capital_amount: capital,
+        weekly_payout_amount: weeklyPayout,
+        total_paid_out: 0,
+        current_week: 0,
+        duration_weeks: Math.round(cycleDays / 7),
+        next_payout_date: nextPayoutDate.toISOString(),
+        status: 'active',
+        reference: reference
+      })
+      .select()
+      .single();
+
+    if (invErr) throw invErr;
+
+    // Log transaction
+    await supabaseAdmin.from('transactions').insert({
+      user_id: userId,
+      transaction_type: 'investment',
+      balance_type: source_balance,
+      amount: capital,
+      currency: 'NGN',
+      status: 'completed',
+      reference: reference,
+      description: `Investment in ${targetDefault.display_name} (₦${capital.toLocaleString()})`,
+      metadata: {
+        investment_id: investment.id,
+        plan_name: plan_name,
+        daily_return: dailyReturn,
+        cycle_days: cycleDays
+      }
+    });
+
+    res.json({
+      status: 'success',
+      message: `Successfully invested in ${targetDefault.display_name}!`,
+      data: {
+        investment,
+        new_balance: newBal,
+        source_balance
+      }
+    });
+
+  } catch (error) {
+    console.error('Invest from balance error:', error);
+    res.status(500).json({ status: 'error', message: error.message || 'Internal server error' });
+  }
+};
+
+// Auto-process overdue investment payouts for a user or globally
+const autoProcessDuePayouts = async (targetUserId = null) => {
+  try {
+    const currentDate = new Date();
+
+    let query = supabaseAdmin
+      .from('investments')
+      .select('*')
+      .eq('status', 'active')
+      .lte('next_payout_date', currentDate.toISOString());
+
+    if (targetUserId) {
+      query = query.eq('user_id', targetUserId);
+    }
+
+    const { data: dueInvestments, error } = await query;
+    if (error || !dueInvestments || dueInvestments.length === 0) {
+      return;
+    }
+
+    for (const investment of dueInvestments) {
+      try {
+        let currentInv = { ...investment };
+
+        while (currentInv.status === 'active' && new Date(currentInv.next_payout_date) <= currentDate) {
+          const nextWeek = (currentInv.current_week || 0) + 1;
+          const durationWeeks = currentInv.duration_weeks || 13;
+          let payoutAmount = parseFloat(currentInv.weekly_payout_amount || 0);
+
+          if (nextWeek >= durationWeeks) {
+            payoutAmount += parseFloat(currentInv.capital_amount || 0);
+          }
+
+          const { data: wallet } = await supabaseAdmin
+            .from('wallets')
+            .select('investment_balance')
+            .eq('user_id', currentInv.user_id)
+            .single();
+
+          const newBalance = parseFloat(wallet?.investment_balance || 0) + payoutAmount;
+
+          await supabaseAdmin
+            .from('wallets')
+            .update({ investment_balance: newBalance })
+            .eq('user_id', currentInv.user_id);
+
+          await supabaseAdmin
+            .from('transactions')
+            .insert({
+              user_id: currentInv.user_id,
+              transaction_type: 'reward',
+              balance_type: 'investment_balance',
+              earning_type: 'investment_return',
+              amount: payoutAmount,
+              currency: 'NGN',
+              status: 'completed',
+              reference: `INV_PAYOUT_${currentInv.id}_WK${nextWeek}_${Date.now()}`,
+              description: `Investment ROI payout - Week ${nextWeek} of ${currentInv.plan_name} plan`,
+              metadata: {
+                investment_id: currentInv.id,
+                week_number: nextWeek,
+                plan_name: currentInv.plan_name
+              }
+            });
+
+          await supabaseAdmin
+            .from('investment_payouts')
+            .insert({
+              investment_id: currentInv.id,
+              week_number: nextWeek,
+              amount: payoutAmount,
+              status: 'completed',
+              scheduled_date: currentInv.next_payout_date,
+              processed_at: currentDate.toISOString()
+            });
+
+          const nextPayoutDate = new Date(currentInv.next_payout_date);
+          nextPayoutDate.setDate(nextPayoutDate.getDate() + 7);
+
+          const newTotalPaidOut = parseFloat(currentInv.total_paid_out || 0) + payoutAmount;
+          const isCompleted = nextWeek >= durationWeeks;
+
+          const updatePayload = {
+            current_week: nextWeek,
+            total_paid_out: newTotalPaidOut,
+            updated_at: currentDate.toISOString(),
+            status: isCompleted ? 'completed' : 'active',
+            ...(isCompleted ? {} : { next_payout_date: nextPayoutDate.toISOString() })
+          };
+
+          await supabaseAdmin
+            .from('investments')
+            .update(updatePayload)
+            .eq('id', currentInv.id);
+
+          currentInv = {
+            ...currentInv,
+            ...updatePayload
+          };
+        }
+      } catch (err) {
+        console.error(`Error auto-processing payout for investment ${investment.id}:`, err);
+      }
+    }
+  } catch (err) {
+    console.error('Auto process due payouts error:', err);
+  }
+};
+
 // Get user's investments
 const getMyInvestments = async (req, res) => {
   try {
     const userId = req.user.id;
+    await autoProcessDuePayouts(userId);
     const { page = 1, limit = 20, status } = req.query;
     const offset = (page - 1) * limit;
 
@@ -203,6 +397,7 @@ const getInvestmentDetails = async (req, res) => {
   try {
     const { investmentId } = req.params;
     const userId = req.user.id;
+    await autoProcessDuePayouts(userId);
 
     const { data: investment, error: investmentError } = await supabaseAdmin
       .from('investments')
@@ -246,6 +441,7 @@ const getInvestmentDetails = async (req, res) => {
 const getDashboard = async (req, res) => {
   try {
     const userId = req.user.id;
+    await autoProcessDuePayouts(userId);
 
     const { data: activeInvestments } = await supabaseAdmin
       .from('investments')
@@ -263,13 +459,13 @@ const getDashboard = async (req, res) => {
       .reduce((sum, inv) => sum + parseFloat(inv.capital_amount), 0);
 
     const totalRoiEarned = (completedInvestments || [])
-      .reduce((sum, inv) => sum + parseFloat(inv.total_paid_out), 0) +
+      .reduce((sum, inv) => sum + parseFloat(inv.total_paid_out || 0), 0) +
       (activeInvestments || [])
-      .reduce((sum, inv) => sum + parseFloat(inv.total_paid_out), 0);
+      .reduce((sum, inv) => sum + parseFloat(inv.total_paid_out || 0), 0);
 
     const { data: wallet } = await supabaseAdmin
       .from('wallets')
-      .select('investment_balance')
+      .select('investment_balance, games_balance')
       .eq('user_id', userId)
       .single();
 
@@ -289,6 +485,7 @@ const getDashboard = async (req, res) => {
           total_invested: totalInvested,
           total_roi_earned: totalRoiEarned,
           withdrawable_balance: parseFloat(wallet?.investment_balance || 0),
+          games_balance: parseFloat(wallet?.games_balance || 0),
           active_investments_count: activeInvestments?.length || 0,
           completed_investments_count: completedInvestments?.length || 0
         },
@@ -313,7 +510,7 @@ const getDashboard = async (req, res) => {
   }
 };
 
-// Request withdrawal from investment balance
+// Request withdrawal from investment balance (Min ₦5,000)
 const requestWithdrawal = async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -348,31 +545,19 @@ const requestWithdrawal = async (req, res) => {
       });
     }
 
-    const { data: withdrawalSetting } = await supabaseAdmin
-      .from('platform_settings')
-      .select('setting_value')
-      .eq('setting_key', 'withdrawal_investment_enabled')
-      .single();
+    // Check if user has active or completed investments
+    const { data: userInvestments } = await supabaseAdmin
+      .from('investments')
+      .select('id, status, current_week, duration_weeks')
+      .eq('user_id', userId);
 
-    if (withdrawalSetting?.setting_value !== 'true') {
-      return res.status(403).json({
-        status: 'error',
-        message: 'Investment withdrawals are currently disabled'
-      });
-    }
+    const hasMatured = (userInvestments || []).some(inv => inv.status === 'completed' || inv.current_week >= (inv.duration_weeks || 13));
+    const hasActive = (userInvestments || []).some(inv => inv.status === 'active');
 
-    const { data: minSetting } = await supabaseAdmin
-      .from('platform_settings')
-      .select('setting_value')
-      .eq('setting_key', 'min_withdrawal_investment')
-      .single();
-
-    const minAmount = parseFloat(minSetting?.setting_value || 5000);
-
-    if (amount < minAmount) {
+    if (!userInvestments || userInvestments.length === 0) {
       return res.status(400).json({
         status: 'error',
-        message: `Minimum withdrawal amount is ₦${minAmount.toLocaleString()}`
+        message: 'You have no active or matured investment plans.'
       });
     }
 
@@ -382,7 +567,7 @@ const requestWithdrawal = async (req, res) => {
       .eq('user_id', userId)
       .single();
 
-    if (walletError) {
+    if (walletError || !wallet) {
       return res.status(404).json({
         status: 'error',
         message: 'Wallet not found'
@@ -493,7 +678,7 @@ const transferToGames = async (req, res) => {
       .eq('setting_key', 'investment_transfer_min_amount')
       .single();
 
-    const minAmount = parseFloat(minSetting?.setting_value || 5000);
+    const minAmount = parseFloat(minSetting?.setting_value || 1000);
 
     if (amount < minAmount) {
       return res.status(400).json({
@@ -666,14 +851,6 @@ const adminGetInvestmentStats = async (req, res) => {
       planBreakdown[inv.plan_name].total_roi_paid += parseFloat(inv.total_paid_out || 0);
     });
 
-    const { data: pendingPayouts } = await supabaseAdmin
-      .from('investment_payouts')
-      .select('amount')
-      .eq('status', 'pending');
-
-    const totalPendingPayouts = pendingPayouts?.reduce((sum, p) => 
-      sum + parseFloat(p.amount), 0) || 0;
-
     res.json({
       status: 'success',
       message: 'Investment statistics retrieved successfully',
@@ -684,8 +861,7 @@ const adminGetInvestmentStats = async (req, res) => {
           completed_investments: completedInvestments.length,
           total_capital_invested: totalCapitalInvested,
           active_capital: activeCapital,
-          total_roi_paid: totalRoiPaid,
-          pending_payouts_amount: totalPendingPayouts
+          total_roi_paid: totalRoiPaid
         },
         plan_breakdown: planBreakdown
       }
@@ -732,8 +908,8 @@ const adminProcessWeeklyPayouts = async (req, res) => {
         const nextWeek = investment.current_week + 1;
         let payoutAmount = parseFloat(investment.weekly_payout_amount);
 
-        // If this is the final week, add the capital back
-        if (nextWeek >= (investment.duration_weeks || 6)) {
+        // If this is the final week, add capital back
+        if (nextWeek >= (investment.duration_weeks || 13)) {
           payoutAmount += parseFloat(investment.capital_amount);
         }
 
@@ -771,22 +947,12 @@ const adminProcessWeeklyPayouts = async (req, res) => {
           .select()
           .single();
 
-        await supabaseAdmin
-          .from('investment_payouts')
-          .update({
-            status: 'completed',
-            processed_at: currentDate.toISOString(),
-            transaction_id: transaction.id
-          })
-          .eq('investment_id', investment.id)
-          .eq('week_number', nextWeek);
-
         const nextPayoutDate = new Date(investment.next_payout_date);
         nextPayoutDate.setDate(nextPayoutDate.getDate() + 7);
 
         const newTotalPaidOut = parseFloat(investment.total_paid_out || 0) + payoutAmount;
 
-        if (nextWeek >= 6) {
+        if (nextWeek >= (investment.duration_weeks || 13)) {
           await supabaseAdmin
             .from('investments')
             .update({
@@ -817,23 +983,13 @@ const adminProcessWeeklyPayouts = async (req, res) => {
       }
     }
 
-    await supabaseAdmin
-      .from('admin_activities')
-      .insert({
-        admin_id: req.user.id,
-        activity_type: 'investment_payouts_processed',
-        description: `Processed ${processedCount} investment payouts totaling ₦${totalAmountPaid.toLocaleString()}`,
-        metadata: { processed_count: processedCount, total_amount: totalAmountPaid, failed_count: errors.length, errors }
-      });
-
     res.json({
       status: 'success',
       message: `Processed ${processedCount} payouts successfully`,
       data: {
         processed: processedCount,
         total_amount: totalAmountPaid,
-        failed: errors.length,
-        errors: errors.length > 0 ? errors : undefined
+        failed: errors.length
       }
     });
 
@@ -956,13 +1112,6 @@ const adminProcessWithdrawal = async (req, res) => {
         .update({ total_withdrawn_investment: newTotalWithdrawn })
         .eq('user_id', transaction.user_id);
 
-      await supabaseAdmin.from('admin_activities').insert({
-        admin_id: adminId,
-        activity_type: 'investment_withdrawal_approved',
-        description: `Approved investment withdrawal of ₦${parseFloat(transaction.amount).toLocaleString()}`,
-        metadata: { transaction_id: transactionId, user_id: transaction.user_id, amount: transaction.amount }
-      });
-
       res.json({
         status: 'success',
         message: 'Withdrawal approved successfully',
@@ -995,13 +1144,6 @@ const adminProcessWithdrawal = async (req, res) => {
 
       if (updateError) throw updateError;
 
-      await supabaseAdmin.from('admin_activities').insert({
-        admin_id: adminId,
-        activity_type: 'investment_withdrawal_declined',
-        description: `Declined investment withdrawal of ₦${parseFloat(transaction.amount).toLocaleString()}`,
-        metadata: { transaction_id: transactionId, user_id: transaction.user_id, amount: transaction.amount, reason: decline_reason }
-      });
-
       res.json({
         status: 'success',
         message: 'Withdrawal declined successfully',
@@ -1027,15 +1169,6 @@ const adminProcessWithdrawal = async (req, res) => {
 // Admin: Bulk process investment withdrawals
 const adminBulkProcessWithdrawals = async (req, res) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({
-        status: 'error',
-        message: 'Validation error',
-        data: { errors: errors.array() }
-      });
-    }
-
     const { transaction_ids, action, decline_reason } = req.body;
     const adminId = req.user.id;
 
@@ -1043,13 +1176,6 @@ const adminBulkProcessWithdrawals = async (req, res) => {
       return res.status(400).json({
         status: 'error',
         message: 'transaction_ids must be a non-empty array'
-      });
-    }
-
-    if (transaction_ids.length > 50) {
-      return res.status(400).json({
-        status: 'error',
-        message: 'Maximum 50 withdrawals can be processed at once'
       });
     }
 
@@ -1123,13 +1249,6 @@ const adminBulkProcessWithdrawals = async (req, res) => {
       }
     }
 
-    await supabaseAdmin.from('admin_activities').insert({
-      admin_id: adminId,
-      activity_type: `investment_withdrawals_bulk_${action}`,
-      description: `Bulk ${action} ${processedCount} investment withdrawals totaling ₦${totalAmount.toLocaleString()}`,
-      metadata: { action, processed_count: processedCount, failed_count: failedIds.length, total_amount: totalAmount, processed_ids: processedIds, failed_ids: failedIds }
-    });
-
     res.json({
       status: 'success',
       message: `Bulk ${action} completed`,
@@ -1152,13 +1271,14 @@ const adminBulkProcessWithdrawals = async (req, res) => {
 };
 
 module.exports = {
-  // User endpoints
   getPlans,
+  investFromBalance,
   getMyInvestments,
   getInvestmentDetails,
   getDashboard,
   requestWithdrawal,
   transferToGames,
+  autoProcessDuePayouts,
   
   // Admin endpoints
   adminGetAllInvestments,

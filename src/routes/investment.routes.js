@@ -84,9 +84,13 @@ const bulkProcessValidation = [
  */
 router.get('/plans', authMiddleware, investmentController.getPlans);
 
- 
+/**
+ * @route   POST /api/investments/invest-from-balance
+ * @desc    Invest in plan using investment_balance or games_balance
+ * @access  Private
+ */
+router.post('/invest-from-balance', authMiddleware, investmentController.investFromBalance);
 
- 
 /**
  * @route   GET /api/investments/my-investments
  * @desc    Get user's investments
