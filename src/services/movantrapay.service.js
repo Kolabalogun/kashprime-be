@@ -3,19 +3,52 @@ const crypto = require('crypto');
 require('dotenv').config({ override: true });
 
 const getBaseUrl = () => process.env.MOVANTRA_BASE_URL || 'https://api.movantrapay.com/v1';
-const getApiKey = () => (process.env.MOVANTRA_API_KEY || 'mvt_pk_test_2959fa00053093948ee0bc93c3bb7922').trim();
+const getApiKey = () => (process.env.MOVANTRA_SECRET_KEY || process.env.MOVANTRA_API_KEY || 'mvt_sk_live_ca677930b09516506366b577896f12ba').trim();
 const getSlug = () => process.env.MOVANTRA_CHECKOUT_SLUG || 'kashprime';
 const getWebhookSecret = () => process.env.MOVANTRA_WEBHOOK_SECRET || getApiKey();
 
 class MovantrapayService {
   /**
    * Initiate a dynamic bank transfer checkout for a payment
-   * Endpoint: POST /checkout/{slug}/initiate
+   * Primary: Generate live PalmPay virtual account via core API
+   * Secondary: Initiate via checkout slug API
    */
   static async initiateCheckout({ customerName, customerEmail, customerPhone, amountNaira, slug }) {
+    const customerRef = `MVT_CHK_${Date.now().toString(36).toUpperCase()}_${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const amountKobo = Math.round(parseFloat(amountNaira) * 100);
+
+    // Primary: Generate PalmPay Virtual Account
+    try {
+      const vaRes = await this.createPalmPayVirtualAccount({
+        customerRef,
+        name: customerName || 'Kashprime Customer',
+        email: customerEmail || 'customer@kashprime.com',
+        phone: customerPhone || '08000000000'
+      });
+
+      if (vaRes && vaRes.success && vaRes.data) {
+        const data = vaRes.data;
+        return {
+          success: true,
+          reference: data.customer_ref || customerRef,
+          account_number: data.account_number,
+          bank_name: data.bank_name || 'PalmPay',
+          account_name: data.account_name || `MOVANTRA / ${customerName || 'Kashprime Customer'}`,
+          amount_kobo: amountKobo,
+          total_kobo: amountKobo,
+          amount_naira: parseFloat(amountNaira),
+          expires_at: expiresAt,
+          raw: data
+        };
+      }
+    } catch (vaError) {
+      console.warn('[MovantrapayService] Virtual account direct creation warning:', vaError.response?.data || vaError.message);
+    }
+
+    // Secondary: Try hosted checkout slug initiate endpoint
     try {
       const targetSlug = slug || getSlug();
-      const amountKobo = Math.round(parseFloat(amountNaira) * 100);
       const url = `${getBaseUrl()}/checkout/${targetSlug}/initiate`;
 
       const payload = {
@@ -44,45 +77,29 @@ class MovantrapayService {
           amount_kobo: payment.amount_kobo,
           total_kobo: payment.total_kobo || payment.amount_kobo,
           amount_naira: (payment.total_kobo || payment.amount_kobo) / 100,
-          expires_at: payment.expires_at,
+          expires_at: payment.expires_at || expiresAt,
           raw: payment
         };
       }
-
-      throw new Error(response.data?.message || 'Failed to initiate Movantrapay checkout');
-    } catch (error) {
-      console.error('[MovantrapayService] Initiate Checkout error:', error.response?.data || error.message);
-      // Fallback: If checkout API slug endpoint fails or is in sandbox, return structured checkout details
-      const fallbackRef = `MVT_CHK_${Date.now().toString(36).toUpperCase()}_${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
-      const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
-
-      return {
-        success: true,
-        reference: fallbackRef,
-        account_number: '90' + Math.floor(10000000 + Math.random() * 90000000),
-        bank_name: 'PalmPay',
-        account_name: `MOVANTRA / ${customerName || 'Kashprime Customer'}`,
-        amount_kobo: Math.round(parseFloat(amountNaira) * 100),
-        total_kobo: Math.round(parseFloat(amountNaira) * 100),
-        amount_naira: parseFloat(amountNaira),
-        expires_at: expiresAt,
-        is_fallback: true
-      };
+    } catch (checkoutError) {
+      console.error('[MovantrapayService] Checkout API error:', checkoutError.response?.data || checkoutError.message);
     }
+
+    throw new Error('Failed to generate dynamic account number from Movantrapay. Please check API configuration.');
   }
 
   /**
-   * Check status of a checkout payment
-   * Endpoint: GET /checkout/status/{reference}
+   * Check status of a checkout payment or transaction reference
    */
   static async checkStatus(reference) {
+    // 1. Try checkout status endpoint
     try {
       const url = `${getBaseUrl()}/checkout/status/${reference}`;
       const response = await axios.get(url, {
         headers: {
           'Authorization': `Bearer ${getApiKey()}`
         },
-        timeout: 10000
+        timeout: 8000
       });
 
       if (response.data) {
@@ -93,17 +110,42 @@ class MovantrapayService {
           raw: response.data
         };
       }
-
-      return { success: false, state: 'unknown', paid: false };
     } catch (error) {
+      // 2. Fallback: check transaction log for matching reference
+      try {
+        const txUrl = `${getBaseUrl()}/transactions`;
+        const txRes = await axios.get(txUrl, {
+          headers: { 'Authorization': `Bearer ${getApiKey()}` },
+          timeout: 8000
+        });
+
+        if (txRes.data && Array.isArray(txRes.data.data)) {
+          const match = txRes.data.data.find(t =>
+            t.reference === reference ||
+            (t.customer_ref && t.customer_ref === reference)
+          );
+          if (match) {
+            const isPaid = match.status === 'successful' || match.status === 'completed' || match.status === 'paid';
+            return {
+              success: true,
+              state: isPaid ? 'paid' : match.status,
+              paid: isPaid,
+              raw: match
+            };
+          }
+        }
+      } catch (txErr) {
+        console.error('[MovantrapayService] Transaction log check error:', txErr.message);
+      }
+
       console.error('[MovantrapayService] Check status error:', error.response?.data || error.message);
-      return {
-        success: false,
-        state: 'pending',
-        paid: false,
-        error: error.response?.data?.message || error.message
-      };
     }
+
+    return {
+      success: false,
+      state: 'pending',
+      paid: false
+    };
   }
 
   /**
